@@ -55,6 +55,22 @@ monitor_fund(returns, title='My Fund', save_path='out.png')
 python cusum.py --demo
 ```
 
+### 5. Generate PDF report
+```bash
+python report.py
+```
+Produces `cusum_report.pdf` — a 5-page report covering:
+
+| Page | Content |
+|------|---------|
+| 1 | Cover — what CUSUM is and why it matters |
+| 2 | Methodology — step-by-step formula walkthrough + threshold table |
+| 3 | Fund universe — all 8 funds, benchmarks, asset classes |
+| 4 | Summary results — IR, TE, cumulative excess, alarm status |
+| 5 | Individual CUSUM charts — 2×4 grid with stats overlaid |
+
+> Requires `pymupdf` and `yfinance`. Fetches live data on each run.
+
 ## Preset fund/benchmark pairs
 
 | Ticker | Benchmark | Description |
