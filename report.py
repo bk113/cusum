@@ -584,85 +584,102 @@ def page_waterfall(pdf, all_results):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PAGE 7 — Individual Fund Charts (7x2 grid)
+# PAGE 7+ — Individual Fund Charts (6 per page, 3 rows x 2 cols)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+FUNDS_PER_PLOT_PAGE = 6   # 3 rows × 2 cols — large enough to read clearly
+
+def _draw_fund_chart(fig, outer, slot, res, rets, mon):
+    """Draw one fund's two-panel chart into a GridSpec slot."""
+    row, col = divmod(slot, 2)
+    inner = gridspec.GridSpecFromSubplotSpec(
+        2, 1, subplot_spec=outer[row, col],
+        hspace=0.0, height_ratios=[1, 1.3])
+    ax1 = fig.add_subplot(inner[0])
+    ax2 = fig.add_subplot(inner[1], sharex=ax1)
+
+    df    = mon.history_df
+    x     = df["t"].values
+    dates = rets.index
+
+    # Panel 1: cumulative excess return
+    ax1.plot(x, df["excess_return"].cumsum(), lw=1.2, color=NAVY)
+    ax1.axhline(0, color=GREY, lw=0.6)
+    ax1.set_facecolor(LGREY)
+    ax1.tick_params(labelbottom=False, labelsize=6)
+    ax1.yaxis.set_tick_params(labelsize=6)
+    ax1.set_title(f"{res['fund']} vs {res['bench']}", fontsize=8.5,
+                  fontweight="bold", color=NAVY, pad=3)
+    ax1.grid(alpha=0.3, lw=0.5)
+
+    # Panel 2: lower CUSUM (L) and upper CUSUM (L_up)
+    ax2.plot(x, df["L"],    lw=1.2, color=NAVY, label="L (loss)")
+    ax2.plot(x, df["L_up"], lw=0.9, color=GREEN, ls="--", label="L_up (gain)")
+    ax2.axhline(mon.threshold, color=RED, ls="--", lw=0.8,
+                label=f"h={mon.threshold}")
+    ax2.invert_yaxis()
+    ax2.set_facecolor(LGREY)
+    ax2.grid(alpha=0.3, lw=0.5)
+
+    # Mark all skill-loss alarm lines
+    for at in mon.all_alarms:
+        ax2.axvline(at, color=RED, lw=0.7, alpha=0.5)
+    if mon.alarm_t and dates is not None and mon.alarm_t <= len(dates):
+        d_str = dates[mon.alarm_t - 1].strftime("%b'%y")
+        ax2.text(mon.alarm_t + len(x) * 0.02,
+                 mon.threshold * 0.55, f"^{d_str}",
+                 color=RED, fontsize=6, fontweight="bold")
+
+    # x-axis date labels
+    if dates is not None and len(dates) >= len(x):
+        tick_locs = [t for t in ax2.get_xticks() if 0 < int(t) <= len(dates)]
+        ax2.set_xticks(tick_locs)
+        ax2.set_xticklabels(
+            [dates[int(t) - 1].strftime("%Y") for t in tick_locs],
+            fontsize=6, rotation=45)
+
+    # Stats annotation
+    n_al   = len(mon.all_alarms)
+    status = f"ALARM {res['alarm_date']} ({n_al}x)" if res["alarm"] else "No Alarm"
+    s_col  = RED if res["alarm"] else GREEN
+    ax1.text(0.98, 0.95,
+             f"IR={res['ir']:+.2f}  TE={res['te']:.1%}\n{status}",
+             transform=ax1.transAxes, fontsize=6.5, ha="right", va="top",
+             color=s_col, fontweight="bold",
+             bbox=dict(boxstyle="round,pad=0.25", facecolor=WHITE,
+                       edgecolor=s_col, alpha=0.9))
+
+
 def page_fund_plots(pdf, all_rets, all_monitors, all_results):
-    fig = plt.figure(figsize=(11, 8.5))
-    fig.patch.set_facecolor(WHITE)
-    fig.text(0.5, 0.975, "Individual Fund CUSUM Charts", ha="center",
-             fontsize=14, fontweight="bold", color=NAVY)
+    """Renders individual fund CUSUM charts, 6 per page."""
+    n_funds      = len(all_results)
+    n_plot_pages = int(np.ceil(n_funds / FUNDS_PER_PLOT_PAGE))
 
-    n_funds = len(all_results)
-    n_cols  = 2
-    n_rows  = int(np.ceil(n_funds / n_cols))
+    for pp in range(n_plot_pages):
+        chunk_res  = all_results[pp * FUNDS_PER_PLOT_PAGE:(pp + 1) * FUNDS_PER_PLOT_PAGE]
+        chunk_rets = all_rets   [pp * FUNDS_PER_PLOT_PAGE:(pp + 1) * FUNDS_PER_PLOT_PAGE]
+        chunk_mon  = all_monitors[pp * FUNDS_PER_PLOT_PAGE:(pp + 1) * FUNDS_PER_PLOT_PAGE]
 
-    outer = gridspec.GridSpec(n_rows, n_cols, figure=fig,
-                              left=0.06, right=0.97,
-                              top=0.955, bottom=0.05,
-                              hspace=0.65, wspace=0.30)
+        n_in_chunk = len(chunk_res)
+        n_rows     = int(np.ceil(n_in_chunk / 2))
 
-    for idx, (res, rets, mon) in enumerate(zip(all_results, all_rets, all_monitors)):
-        row, col = divmod(idx, n_cols)
-        inner = gridspec.GridSpecFromSubplotSpec(
-            2, 1, subplot_spec=outer[row, col],
-            hspace=0.0, height_ratios=[1, 1.2])
-        ax1 = fig.add_subplot(inner[0])
-        ax2 = fig.add_subplot(inner[1], sharex=ax1)
+        fig = plt.figure(figsize=(11, 8.5))
+        fig.patch.set_facecolor(WHITE)
+        fig.text(0.5, 0.980,
+                 f"Individual Fund CUSUM Charts — page {pp+1} of {n_plot_pages}",
+                 ha="center", fontsize=12, fontweight="bold", color=NAVY)
 
-        df    = mon.history_df
-        x     = df["t"].values
-        dates = rets.index
+        outer = gridspec.GridSpec(n_rows, 2, figure=fig,
+                                  left=0.06, right=0.97,
+                                  top=0.960, bottom=0.05,
+                                  hspace=0.70, wspace=0.30)
 
-        # Panel 1: cumulative excess return
-        ax1.plot(x, df["excess_return"].cumsum(), lw=1.0, color=NAVY)
-        ax1.axhline(0, color=GREY, lw=0.5)
-        ax1.set_facecolor(LGREY)
-        ax1.tick_params(labelbottom=False, labelsize=5)
-        ax1.yaxis.set_tick_params(labelsize=5)
-        ax1.set_title(f"{res['fund']} vs {res['bench']}", fontsize=7,
-                      fontweight="bold", color=NAVY, pad=2)
-        ax1.grid(alpha=0.3, lw=0.4)
+        for slot, (res, rets, mon) in enumerate(zip(chunk_res, chunk_rets, chunk_mon)):
+            _draw_fund_chart(fig, outer, slot, res, rets, mon)
 
-        # Panel 2: lower CUSUM (L) and upper CUSUM (L_up)
-        ax2.plot(x, df["L"],    lw=1.0, color=NAVY, label="L (loss)")
-        ax2.plot(x, df["L_up"], lw=0.8, color=GREEN, ls="--", label="L_up (gain)")
-        ax2.axhline(mon.threshold, color=RED, ls="--", lw=0.7)
-        ax2.invert_yaxis()
-        ax2.set_facecolor(LGREY)
-        ax2.grid(alpha=0.3, lw=0.4)
-
-        # Mark all skill-loss alarms
-        for at in mon.all_alarms:
-            ax2.axvline(at, color=RED, lw=0.6, alpha=0.5)
-        if mon.alarm_t and dates is not None and mon.alarm_t <= len(dates):
-            d_str = dates[mon.alarm_t - 1].strftime("%b'%y")
-            ax2.text(mon.alarm_t + len(x) * 0.02,
-                     mon.threshold * 0.55, f"^{d_str}",
-                     color=RED, fontsize=5, fontweight="bold")
-
-        # x-axis date labels
-        if dates is not None and len(dates) >= len(x):
-            tick_locs = [t for t in ax2.get_xticks() if 0 < int(t) <= len(dates)]
-            ax2.set_xticks(tick_locs)
-            ax2.set_xticklabels(
-                [dates[int(t) - 1].strftime("%Y") for t in tick_locs],
-                fontsize=4.5, rotation=45)
-
-        # Stats annotation
-        n_al    = len(mon.all_alarms)
-        status  = f"ALARM {res['alarm_date']} ({n_al}x)" if res["alarm"] else "No Alarm"
-        s_col   = RED if res["alarm"] else GREEN
-        ax1.text(0.98, 0.95,
-                 f"IR={res['ir']:+.2f} TE={res['te']:.1%}\n{status}",
-                 transform=ax1.transAxes, fontsize=5, ha="right", va="top",
-                 color=s_col, fontweight="bold",
-                 bbox=dict(boxstyle="round,pad=0.2", facecolor=WHITE,
-                           edgecolor=s_col, alpha=0.85))
-
-    page_footer(fig, 7)
-    pdf.savefig(fig, bbox_inches="tight")
-    plt.close(fig)
+        page_footer(fig, 7)
+        pdf.savefig(fig, bbox_inches="tight")
+        plt.close(fig)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
