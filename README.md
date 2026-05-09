@@ -6,12 +6,27 @@ Single-file implementation of the **Philips-Yashchin-Stein (2003)** statistical 
 
 Applies a CUSUM (cumulative sum) change-point detector to a fund's monthly excess returns. It raises an alarm when the manager's Information Ratio falls below a threshold — signalling a potential loss of skill.
 
-## Dependencies
+## Installation
 
+**Clone the repo:**
+```bash
+git clone https://github.com/bk113/cusum.git
+cd cusum
 ```
-pip install numpy pandas matplotlib
-pip install yfinance  # optional, for live data
+
+**Install dependencies:**
+```bash
+pip install -r requirements.txt
 ```
+
+Or install manually:
+```bash
+pip install numpy pandas matplotlib pymupdf yfinance
+```
+
+> `yfinance` is required for live Yahoo Finance data.  
+> `pymupdf` is required for PDF report generation (`report.py`).  
+> All other packages are required for core CUSUM functionality.
 
 ## Usage
 
