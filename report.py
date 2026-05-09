@@ -237,92 +237,92 @@ def page_methodology(pdf):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def page_fund_universe(pdf):
-    fig = plt.figure(figsize=(11, 8.5))
-    fig.patch.set_facecolor(WHITE)
-
-    fig.text(0.5, 0.96, "Fund Universe", ha="center", fontsize=20,
-             fontweight="bold", color=NAVY)
-    fig.text(0.5, 0.928, "Fourteen active managers across equity, international, and fixed income",
-             ha="center", fontsize=11, color="grey")
-
-    headers  = ["#", "Ticker", "Fund Name", "Benchmark", "Asset Class", "Start", "h"]
-    col_x    = [0.035, 0.075, 0.175, 0.545, 0.640, 0.760, 0.855]
-
-    header_rect = FancyBboxPatch((0.03, 0.878), 0.94, 0.026,
-                                 boxstyle="round,pad=0.003",
-                                 facecolor=NAVY, edgecolor="none",
-                                 transform=fig.transFigure)
-    fig.add_artist(header_rect)
-    for hdr, x in zip(headers, col_x):
-        fig.text(x, 0.884, hdr, fontsize=8.5, fontweight="bold",
-                 color=WHITE, va="center")
-
+    """Renders fund universe across as many pages as needed (20 rows per page)."""
     asset_classes = [
         "US Large Growth", "US Large Value",  "US Large Blend",  "US Small Cap",
         "Intl Developed",  "Emerging Markets","Balanced 60/40",  "US Fixed Income",
         "Balanced 60/40",  "US Large Blend",  "US Large Blend",  "US Small/Mid Cap",
         "Intl Value",      "US Fixed Income",
+        # EM funds (27)
+        "Emerging Markets","Emerging Markets","Emerging Markets","Emerging Markets",
+        "Emerging Markets","Emerging Markets","Emerging Markets","Emerging Markets",
+        "Emerging Markets","Emerging Markets","Emerging Markets","Emerging Markets",
+        "Emerging Markets","Emerging Markets","Emerging Markets","Emerging Markets",
+        "Emerging Markets","Emerging Markets","Emerging Markets","Emerging Markets",
+        "Emerging Markets","Emerging Markets","Emerging Markets","Emerging Markets",
+        "Emerging Markets","Emerging Markets","Emerging Markets",
     ]
-
     color_map = {
-        "US Large Growth":   NAVY,
-        "US Large Value":    NAVY,
-        "US Large Blend":    NAVY,
-        "US Small Cap":      NAVY,
-        "US Small/Mid Cap":  NAVY,
-        "Intl Developed":    "#1A5276",
-        "Intl Value":        "#1A5276",
-        "Emerging Markets":  "#1A5276",
-        "Balanced 60/40":    "#145A32",
-        "US Fixed Income":   "#145A32",
+        "US Large Growth": NAVY, "US Large Value": NAVY, "US Large Blend": NAVY,
+        "US Small Cap": NAVY, "US Small/Mid Cap": NAVY,
+        "Intl Developed": "#1A5276", "Intl Value": "#1A5276", "Emerging Markets": "#1A5276",
+        "Balanced 60/40": "#145A32", "US Fixed Income": "#145A32",
     }
 
-    rows = []
+    all_rows = []
     for i, (ticker, (fund, bench, name)) in enumerate(PRESET_PAIRS.items()):
-        rows.append([str(i + 1), fund, name, bench, asset_classes[i], "Jan 2005", "19.81"])
+        all_rows.append([str(i + 1), fund, name, bench,
+                         asset_classes[i] if i < len(asset_classes) else "Other",
+                         "Jan 2005", "19.81"])
 
-    for r, row in enumerate(rows):
-        bg   = LGREY if r % 2 == 0 else WHITE
-        yrow = 0.848 - r * 0.048
-        rect = FancyBboxPatch((0.03, yrow - 0.013), 0.94, 0.043,
-                              boxstyle="round,pad=0.002",
-                              facecolor=bg, edgecolor="none",
-                              transform=fig.transFigure)
-        fig.add_artist(rect)
-        ac_col = color_map.get(row[4], NAVY)
-        for j, (val, x) in enumerate(zip(row, col_x)):
-            col = ac_col if j == 4 else NAVY
-            fig.text(x, yrow + 0.008, val, fontsize=8, va="center", color=col)
+    rows_per_page = 20
+    total_fund_pages = int(np.ceil(len(all_rows) / rows_per_page))
+    headers = ["#", "Ticker", "Fund Name", "Benchmark", "Asset Class", "Start", "h"]
+    col_x   = [0.035, 0.075, 0.175, 0.545, 0.640, 0.760, 0.855]
 
-    # Legend
-    fig.text(0.04, 0.185, "Asset Class Groups:", fontsize=9, fontweight="bold", color=NAVY)
-    legend_items = [
-        (NAVY,     "US Equity (FCNTX, DODGX, AGTHX, OTCFX, FMAGX, SEQUX, FLPSX)"),
-        ("#1A5276", "International Equity (OAKIX, TEDMX, DODWX)"),
-        ("#145A32", "Fixed Income / Balanced (VWELX, PTTRX, PRWCX, LSBRX)"),
-    ]
-    for gy, (col, label) in zip([0.163, 0.143, 0.123], legend_items):
-        fig.text(0.06, gy, f"  {label}", fontsize=8.5, color=col)
+    for fp in range(total_fund_pages):
+        chunk = all_rows[fp * rows_per_page:(fp + 1) * rows_per_page]
+        fig   = plt.figure(figsize=(11, 8.5))
+        fig.patch.set_facecolor(WHITE)
 
-    # Threshold box
-    ax_box = fig.add_axes([0.04, 0.03, 0.92, 0.082])
-    ax_box.set_facecolor(LGREY)
-    for sp in ax_box.spines.values():
-        sp.set_visible(False)
-    ax_box.set_xticks([]); ax_box.set_yticks([])
-    ax_box.text(0.5, 0.88, "Threshold Choice: h = 19.81 (paper default)",
-                ha="center", va="top", fontsize=9.5, fontweight="bold", color=NAVY,
-                transform=ax_box.transAxes)
-    ax_box.text(0.5, 0.55,
-                "At h=19.81 the expected time between false alarms is ~60 months (5 years) when "
-                "true IR=+0.5. A higher h (e.g. 23.59) reduces false alarms at the cost of "
-                "slower detection. Adjustable via the `threshold` parameter in monitor_fund().",
-                ha="center", va="top", fontsize=8.5, color="#444444",
-                transform=ax_box.transAxes, linespacing=1.6)
+        subtitle = (f"{len(all_rows)} active managers — page {fp+1} of {total_fund_pages}"
+                    if total_fund_pages > 1 else
+                    f"{len(all_rows)} active managers across equity, international, fixed income & EM")
+        fig.text(0.5, 0.96, "Fund Universe", ha="center", fontsize=20,
+                 fontweight="bold", color=NAVY)
+        fig.text(0.5, 0.928, subtitle, ha="center", fontsize=11, color="grey")
 
-    page_footer(fig, 3)
-    pdf.savefig(fig, bbox_inches="tight")
-    plt.close(fig)
+        header_rect = FancyBboxPatch((0.03, 0.878), 0.94, 0.026,
+                                     boxstyle="round,pad=0.003",
+                                     facecolor=NAVY, edgecolor="none",
+                                     transform=fig.transFigure)
+        fig.add_artist(header_rect)
+        for hdr, x in zip(headers, col_x):
+            fig.text(x, 0.884, hdr, fontsize=8.5, fontweight="bold",
+                     color=WHITE, va="center")
+
+        row_h   = min(0.040, 0.82 / max(len(chunk), 1))
+        y_start = 0.862
+
+        for r, row in enumerate(chunk):
+            bg   = LGREY if r % 2 == 0 else WHITE
+            yrow = y_start - (r + 1) * row_h
+            rect = FancyBboxPatch((0.03, yrow - 0.005), 0.94, row_h - 0.003,
+                                  boxstyle="round,pad=0.002",
+                                  facecolor=bg, edgecolor="none",
+                                  transform=fig.transFigure)
+            fig.add_artist(rect)
+            ac_col = color_map.get(row[4], NAVY)
+            for j, (val, x) in enumerate(zip(row, col_x)):
+                col = ac_col if j == 4 else NAVY
+                fig.text(x, yrow + row_h * 0.25, val,
+                         fontsize=7.5, va="center", color=col)
+
+        # Legend (first page only)
+        if fp == 0:
+            legend_y = max(0.04, y_start - (len(chunk) + 1) * row_h - 0.01)
+            legend_items = [
+                (NAVY,     "US Equity (FCNTX, DODGX, AGTHX, OTCFX, FMAGX, SEQUX, FLPSX)"),
+                ("#1A5276", "Intl & Emerging Markets (OAKIX, TEDMX, DODWX, + 27 EM funds)"),
+                ("#145A32", "Fixed Income / Balanced (VWELX, PTTRX, PRWCX, LSBRX)"),
+            ]
+            for li, (col, label) in enumerate(legend_items):
+                fig.text(0.06, legend_y - li * 0.020, f"  {label}",
+                         fontsize=8, color=col)
+
+        page_footer(fig, 3)
+        pdf.savefig(fig, bbox_inches="tight")
+        plt.close(fig)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -330,89 +330,91 @@ def page_fund_universe(pdf):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def page_summary(pdf, all_results):
-    fig = plt.figure(figsize=(11, 8.5))
-    fig.patch.set_facecolor(WHITE)
-
-    fig.text(0.5, 0.96, "Summary Results", ha="center", fontsize=20,
-             fontweight="bold", color=NAVY)
-    fig.text(0.5, 0.928, "CUSUM alarm status and key statistics (Jan 2005 - present)",
-             ha="center", fontsize=11, color="grey")
-
+    """Renders summary results across as many pages as needed (18 rows per page)."""
     headers = ["Fund", "Bench", "Months", "Ann TE", "IR (95% CI)", "Cum Excess",
                "# Alarms", "Alarm?", "First Alarm"]
     col_x   = [0.035, 0.098, 0.163, 0.228, 0.300, 0.445, 0.555, 0.630, 0.715]
 
-    header_rect = FancyBboxPatch((0.03, 0.878), 0.94, 0.026,
-                                 boxstyle="round,pad=0.003",
-                                 facecolor=NAVY, edgecolor="none",
-                                 transform=fig.transFigure)
-    fig.add_artist(header_rect)
-    for hdr, x in zip(headers, col_x):
-        fig.text(x, 0.884, hdr, fontsize=8, fontweight="bold", color=WHITE, va="center")
-
-    for r, res in enumerate(all_results):
-        bg   = LGREY if r % 2 == 0 else WHITE
-        yrow = 0.845 - r * 0.048
-        rect = FancyBboxPatch((0.03, yrow - 0.013), 0.94, 0.043,
-                              boxstyle="round,pad=0.002",
-                              facecolor=bg, edgecolor="none",
-                              transform=fig.transFigure)
-        fig.add_artist(rect)
-
-        alarm_col  = RED   if res["alarm"] else GREEN
-        alarm_text = "YES" if res["alarm"] else "NO"
-        ir_col     = (GREEN if res["ir"] > 0.3 else (RED if res["ir"] < 0.1 else NAVY))
-        ci_str     = (f"{res['ir']:+.2f} [{res['ir_lo']:+.2f},{res['ir_hi']:+.2f}]"
-                      if "ir_lo" in res else f"{res['ir']:+.2f}")
-
-        vals   = [res["fund"], res["bench"], str(res["months"]),
-                  f"{res['te']:.1%}", ci_str, f"{res['cum_excess']:+.1%}",
-                  str(res.get("n_alarms", "-")), alarm_text, res["alarm_date"]]
-        colors = [NAVY, NAVY, NAVY, NAVY, ir_col, NAVY, NAVY, alarm_col, alarm_col]
-
-        for val, x, col in zip(vals, col_x, colors):
-            fig.text(x, yrow + 0.008, val, fontsize=7.5, va="center",
-                     color=col, fontweight="bold" if col != NAVY else "normal")
-
-    # Key legend
-    fig.text(0.04, 0.185, "Key:",
-             fontsize=9, fontweight="bold", color=NAVY)
-    fig.text(0.04, 0.165,
-             "IR (green): IR > 0.30 strong skill  |  IR (red): IR < 0.10 weak/no skill  |  "
-             "# Alarms: rolling restart count  |  95% CI from block bootstrap (n=1000)",
-             fontsize=8, color="#444444")
-
-    # Observations box
-    ax_obs = fig.add_axes([0.04, 0.03, 0.92, 0.120])
-    ax_obs.set_facecolor("#EAF2FF")
-    for sp in ax_obs.spines.values():
-        sp.set_visible(False)
-    ax_obs.set_xticks([]); ax_obs.set_yticks([])
+    rows_per_page  = 18
+    total_sum_pages = int(np.ceil(len(all_results) / rows_per_page))
 
     alarm_funds = [r for r in all_results if r["alarm"]]
     clean_funds = [r for r in all_results if not r["alarm"]]
     best_ir     = max(all_results, key=lambda x: x["ir"])
     most_alarms = max(all_results, key=lambda x: x.get("n_alarms", 0))
 
-    ax_obs.text(0.5, 0.93, "Key Observations", ha="center", va="top",
-                fontsize=10, fontweight="bold", color=NAVY,
-                transform=ax_obs.transAxes)
-    obs = (
-        f"  {len(alarm_funds)} of {len(all_results)} managers triggered a CUSUM alarm. "
-        f"Most alarms clustered around the 2007-2009 Global Financial Crisis.\n"
-        f"  Clean record: {', '.join(f['fund'] for f in clean_funds)} — "
-        f"no alarm fired across the full observation period.\n"
-        f"  Strongest manager: {best_ir['fund']} IR={best_ir['ir']:+.2f}, "
-        f"cumulative excess {best_ir['cum_excess']:+.1%}.\n"
-        f"  Most re-alarms (rolling restart): {most_alarms['fund']} "
-        f"with {most_alarms.get('n_alarms', 0)} total alarms."
-    )
-    ax_obs.text(0.02, 0.68, obs, va="top", fontsize=8.5, color="#333333",
-                transform=ax_obs.transAxes, linespacing=1.7)
+    for sp in range(total_sum_pages):
+        chunk = all_results[sp * rows_per_page:(sp + 1) * rows_per_page]
+        fig   = plt.figure(figsize=(11, 8.5))
+        fig.patch.set_facecolor(WHITE)
 
-    page_footer(fig, 4)
-    pdf.savefig(fig, bbox_inches="tight")
-    plt.close(fig)
+        subtitle = (f"CUSUM alarm status and key statistics (Jan 2005 - present) "
+                    f"— page {sp+1} of {total_sum_pages}"
+                    if total_sum_pages > 1 else
+                    "CUSUM alarm status and key statistics (Jan 2005 - present)")
+        fig.text(0.5, 0.96, "Summary Results", ha="center", fontsize=20,
+                 fontweight="bold", color=NAVY)
+        fig.text(0.5, 0.928, subtitle, ha="center", fontsize=10, color="grey")
+
+        header_rect = FancyBboxPatch((0.03, 0.878), 0.94, 0.026,
+                                     boxstyle="round,pad=0.003",
+                                     facecolor=NAVY, edgecolor="none",
+                                     transform=fig.transFigure)
+        fig.add_artist(header_rect)
+        for hdr, x in zip(headers, col_x):
+            fig.text(x, 0.884, hdr, fontsize=8, fontweight="bold", color=WHITE, va="center")
+
+        row_h   = min(0.042, 0.75 / max(len(chunk), 1))
+        y_start = 0.862
+
+        for r, res in enumerate(chunk):
+            bg        = LGREY if r % 2 == 0 else WHITE
+            yrow      = y_start - (r + 1) * row_h
+            rect      = FancyBboxPatch((0.03, yrow - 0.004), 0.94, row_h - 0.003,
+                                       boxstyle="round,pad=0.002",
+                                       facecolor=bg, edgecolor="none",
+                                       transform=fig.transFigure)
+            fig.add_artist(rect)
+
+            alarm_col  = RED   if res["alarm"] else GREEN
+            alarm_text = "YES" if res["alarm"] else "NO"
+            ir_col     = (GREEN if res["ir"] > 0.3 else (RED if res["ir"] < 0.1 else NAVY))
+            ci_str     = (f"{res['ir']:+.2f} [{res['ir_lo']:+.2f},{res['ir_hi']:+.2f}]"
+                          if "ir_lo" in res else f"{res['ir']:+.2f}")
+
+            vals   = [res["fund"], res["bench"], str(res["months"]),
+                      f"{res['te']:.1%}", ci_str, f"{res['cum_excess']:+.1%}",
+                      str(res.get("n_alarms", "-")), alarm_text, res["alarm_date"]]
+            colors = [NAVY, NAVY, NAVY, NAVY, ir_col, NAVY, NAVY, alarm_col, alarm_col]
+
+            for val, x, col in zip(vals, col_x, colors):
+                fig.text(x, yrow + row_h * 0.3, val, fontsize=7.5, va="center",
+                         color=col, fontweight="bold" if col != NAVY else "normal")
+
+        # Key observations box on last page only
+        if sp == total_sum_pages - 1:
+            obs_y = max(0.03, y_start - (len(chunk) + 1) * row_h - 0.01)
+            ax_obs = fig.add_axes([0.04, obs_y, 0.92, min(0.13, obs_y + 0.10)])
+            ax_obs.set_facecolor("#EAF2FF")
+            for s in ax_obs.spines.values():
+                s.set_visible(False)
+            ax_obs.set_xticks([]); ax_obs.set_yticks([])
+            ax_obs.text(0.5, 0.95, "Key Observations", ha="center", va="top",
+                        fontsize=9, fontweight="bold", color=NAVY,
+                        transform=ax_obs.transAxes)
+            obs = (
+                f"  {len(alarm_funds)} of {len(all_results)} managers triggered an alarm. "
+                f"Clean record: {', '.join(f['fund'] for f in clean_funds[:5])}{'...' if len(clean_funds) > 5 else ''}.\n"
+                f"  Strongest IR: {best_ir['fund']} ({best_ir['ir']:+.2f}), "
+                f"cum excess {best_ir['cum_excess']:+.1%}.  "
+                f"Most re-alarms: {most_alarms['fund']} ({most_alarms.get('n_alarms', 0)}x)."
+            )
+            ax_obs.text(0.02, 0.62, obs, va="top", fontsize=8, color="#333333",
+                        transform=ax_obs.transAxes, linespacing=1.6)
+
+        page_footer(fig, 4)
+        pdf.savefig(fig, bbox_inches="tight")
+        plt.close(fig)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
