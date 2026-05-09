@@ -1,14 +1,16 @@
 """
 CUSUM Active-Manager Monitor — PDF & HTML Report Generator
 ===========================================================
-Generates a 7-page PDF report (and optional self-contained HTML):
-  1. Cover + CIO case for CUSUM
-  2. Methodology — step-by-step formula walkthrough
-  3. Fund universe — 14 funds, benchmarks, thresholds
-  4. Summary results — IR, TE, CI, alarm status
-  5. Post-alarm analysis — returns after each alarm
-  6. Waterfall chart — cumulative excess ranked
-  7. Individual CUSUM charts
+Generates a multi-page PDF report (and optional self-contained HTML).
+
+Page structure (computed dynamically from fund count):
+  1.    Cover + CIO case for CUSUM
+  2.    Methodology — step-by-step formula walkthrough + threshold table
+  3–N.  Fund universe (20 funds per page)
+  N+.   Summary results — IR 95% CI, TE, alarms (18 per page)
+  M+.   Post-alarm analysis — returns after each alarm (14 per page)
+  P+1.  Waterfall chart — cumulative excess ranked
+  P+2+. Individual CUSUM charts (6 per page, 3×2 grid)
 
 Run:
     python report.py                 # PDF only
@@ -34,11 +36,17 @@ from cusum import (
     CUSUMMonitor, load_from_yfinance, monitor_fund,
     PRESET_PAIRS, THRESHOLD_TABLE,
     bootstrap_ir_ci, post_alarm_returns,
+    compute_extra_stats, alarm_regime, signal_quality,
+    MIN_MONITORING_MONTHS, GFC_START, GFC_END, COVID_START, COVID_END,
 )
 
-TOTAL_PAGES = 7
+# ── Layout constants ───────────────────────────────────────────────────────────
+FUNDS_PER_PLOT_PAGE = 6    # 3 rows × 2 cols per chart page
+UNIVERSE_PER_PAGE   = 20
+SUMMARY_PER_PAGE    = 18
+POST_ALARM_PER_PAGE = 14
 
-# ── Colour palette ────────────────────────────────────────────────────────────
+# ── Colour palette ─────────────────────────────────────────────────────────────
 NAVY  = "#1E2761"
 RED   = "#C0392B"
 GOLD  = "#D4AC0D"
@@ -47,12 +55,68 @@ LGREY = "#F4F6F7"
 WHITE = "#FFFFFF"
 GREEN = "#1E8449"
 
+# ── Asset class lookup (benchmark-driven + per-ticker overrides) ───────────────
+BENCH_TO_ASSET_CLASS = {
+    "IWF":  "US Large Growth",
+    "IWD":  "US Large Value",
+    "SPY":  "US Large Blend",
+    "IWM":  "US Small Cap",
+    "EFA":  "Intl Developed",
+    "EEM":  "Emerging Markets",
+    "AOR":  "Balanced 60/40",
+    "AGG":  "US Fixed Income",
+    "EMB":  "EM Hard CCY Debt",
+    "EMLC": "EM Local CCY Debt",
+    "ACWI": "Global Equity",
+    "URTH": "Global Equity",
+}
+TICKER_AC_OVERRIDES = {
+    "FLPSX": "US Small/Mid Cap",
+    "DODWX": "Intl Value",
+}
+ASSET_CLASS_COLORS = {
+    "US Large Growth":   NAVY,
+    "US Large Value":    NAVY,
+    "US Large Blend":    NAVY,
+    "US Small Cap":      NAVY,
+    "US Small/Mid Cap":  NAVY,
+    "Intl Developed":    "#1A5276",
+    "Intl Value":        "#1A5276",
+    "Emerging Markets":  "#1A5276",
+    "Balanced 60/40":    "#145A32",
+    "US Fixed Income":   "#145A32",
+    "EM Hard CCY Debt":  "#6E2F8A",
+    "EM Local CCY Debt": "#6E2F8A",
+    "Global Equity":     "#7D6608",
+}
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
-def page_footer(fig, page_num):
+def _asset_class(fund_ticker, bench):
+    return TICKER_AC_OVERRIDES.get(fund_ticker,
+           BENCH_TO_ASSET_CLASS.get(bench, "Other"))
+
+
+# ── Page-count helper ──────────────────────────────────────────────────────────
+
+def compute_total_pages(all_results):
+    n_universe = len(PRESET_PAIRS)
+    n_loaded   = len(all_results)
+    n_alarm    = sum(1 for r in all_results if r["alarm"])
+    return (
+        2                                                               # cover + methodology
+        + max(1, int(np.ceil(n_universe / UNIVERSE_PER_PAGE)))         # fund universe
+        + max(1, int(np.ceil(n_loaded   / SUMMARY_PER_PAGE)))          # summary
+        + max(1, int(np.ceil(n_alarm    / POST_ALARM_PER_PAGE)))       # post-alarm
+        + 1                                                             # waterfall
+        + max(1, int(np.ceil(n_loaded   / FUNDS_PER_PLOT_PAGE)))       # charts
+    )
+
+
+# ── Footer ─────────────────────────────────────────────────────────────────────
+
+def page_footer(fig, page_num, total_pages):
     fig.text(0.5, 0.02,
-             f"CUSUM Active-Manager Monitor  •  page {page_num} of {TOTAL_PAGES}",
+             f"CUSUM Active-Manager Monitor  •  page {page_num} of {total_pages}",
              ha="center", va="bottom", fontsize=8, color="grey")
     fig.text(0.92, 0.02, datetime.today().strftime("%d %b %Y"),
              ha="right", va="bottom", fontsize=8, color="grey")
@@ -69,11 +133,10 @@ def _fig_to_base64(fig) -> str:
 # PAGE 1 — Cover + CIO Case
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def page_cover(pdf):
+def page_cover(pdf, pnum, total_pages):
     fig = plt.figure(figsize=(11, 8.5))
     fig.patch.set_facecolor(NAVY)
 
-    # Title
     fig.text(0.5, 0.91, "CUSUM Active-Manager Monitor",
              ha="center", fontsize=26, fontweight="bold", color=WHITE)
     fig.text(0.5, 0.85, "Statistical Process Control for Portfolio Manager Oversight",
@@ -85,9 +148,7 @@ def page_cover(pdf):
                       color=GOLD, lw=1.2)
     fig.add_artist(line)
 
-    # What is CUSUM
-    fig.text(0.08, 0.74, "What is CUSUM?", fontsize=13, fontweight="bold",
-             color=GOLD)
+    fig.text(0.08, 0.74, "What is CUSUM?", fontsize=13, fontweight="bold", color=GOLD)
     fig.text(0.08, 0.69,
              "CUSUM (Cumulative Sum) is a sequential change-point detection method from "
              "statistical process control, adapted for investment management by Philips, "
@@ -97,7 +158,6 @@ def page_cover(pdf):
              "Has a fund manager lost their investment skill — and if so, exactly when?",
              fontsize=10, color=GOLD, fontstyle="italic", va="top")
 
-    # Why it matters — CIO case
     fig.text(0.08, 0.585, "The Case for CUSUM — Why CIOs Should Care",
              fontsize=13, fontweight="bold", color=GOLD)
 
@@ -127,8 +187,7 @@ def page_cover(pdf):
 
     y = 0.545
     for title, body in reasons:
-        fig.text(0.10, y, f"  {title}:", fontsize=8.5, fontweight="bold",
-                 color=GOLD)
+        fig.text(0.10, y, f"  {title}:", fontsize=8.5, fontweight="bold", color=GOLD)
         fig.text(0.10, y - 0.028, f"  {body}", fontsize=7.8, color=GREY,
                  va="top", linespacing=1.4)
         y -= 0.068
@@ -139,6 +198,8 @@ def page_cover(pdf):
              "Journal of Portfolio Management, 30(1), 86-94.",
              ha="center", fontsize=7.5, color=GREY, style="italic")
 
+    page_footer(fig, pnum[0], total_pages)
+    pnum[0] += 1
     pdf.savefig(fig, bbox_inches="tight")
     plt.close(fig)
 
@@ -147,7 +208,7 @@ def page_cover(pdf):
 # PAGE 2 — Methodology
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def page_methodology(pdf):
+def page_methodology(pdf, pnum, total_pages):
     fig = plt.figure(figsize=(11, 8.5))
     fig.patch.set_facecolor(WHITE)
 
@@ -192,13 +253,11 @@ def page_methodology(pdf):
         ax_b.set_xlim(0, 1); ax_b.set_ylim(0, 1); ax_b.axis("off")
 
         fig.text(0.10, y, title, fontsize=10.5, fontweight="bold", color=NAVY)
-        fig.text(0.10, y - 0.027, formula, fontsize=9, color=RED,
-                 fontfamily="monospace")
+        fig.text(0.10, y - 0.027, formula, fontsize=9, color=RED, fontfamily="monospace")
         fig.text(0.10, y - 0.050, explanation, fontsize=8.5, color="#555555",
                  va="top", linespacing=1.4)
         y -= 0.148
 
-    # Threshold table
     fig.text(0.08, 0.112, "Alarm Threshold Reference Table (Table 2, Philips et al. 2003)",
              fontsize=10, fontweight="bold", color=NAVY)
 
@@ -211,7 +270,7 @@ def page_methodology(pdf):
                  bbox=dict(boxstyle="round,pad=0.3", facecolor=NAVY, edgecolor="none"))
 
     for r, row in enumerate(THRESHOLD_TABLE.values.tolist()):
-        bg  = LGREY if r % 2 == 0 else WHITE
+        bg   = LGREY if r % 2 == 0 else WHITE
         yrow = 0.076 - r * 0.021
         rect = FancyBboxPatch((0.075, yrow - 0.007), 0.85, 0.019,
                               boxstyle="round,pad=0.002",
@@ -227,51 +286,28 @@ def page_methodology(pdf):
         if highlight:
             fig.text(0.90, yrow, "<- default", fontsize=7, color=RED, style="italic")
 
-    page_footer(fig, 2)
+    page_footer(fig, pnum[0], total_pages)
+    pnum[0] += 1
     pdf.savefig(fig, bbox_inches="tight")
     plt.close(fig)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PAGE 3 — Fund Universe
+# PAGES 3+ — Fund Universe
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def page_fund_universe(pdf):
-    """Renders fund universe across as many pages as needed (20 rows per page)."""
-    asset_classes = [
-        "US Large Growth", "US Large Value",  "US Large Blend",  "US Small Cap",
-        "Intl Developed",  "Emerging Markets","Balanced 60/40",  "US Fixed Income",
-        "Balanced 60/40",  "US Large Blend",  "US Large Blend",  "US Small/Mid Cap",
-        "Intl Value",      "US Fixed Income",
-        # EM funds (27)
-        "Emerging Markets","Emerging Markets","Emerging Markets","Emerging Markets",
-        "Emerging Markets","Emerging Markets","Emerging Markets","Emerging Markets",
-        "Emerging Markets","Emerging Markets","Emerging Markets","Emerging Markets",
-        "Emerging Markets","Emerging Markets","Emerging Markets","Emerging Markets",
-        "Emerging Markets","Emerging Markets","Emerging Markets","Emerging Markets",
-        "Emerging Markets","Emerging Markets","Emerging Markets","Emerging Markets",
-        "Emerging Markets","Emerging Markets","Emerging Markets",
-    ]
-    color_map = {
-        "US Large Growth": NAVY, "US Large Value": NAVY, "US Large Blend": NAVY,
-        "US Small Cap": NAVY, "US Small/Mid Cap": NAVY,
-        "Intl Developed": "#1A5276", "Intl Value": "#1A5276", "Emerging Markets": "#1A5276",
-        "Balanced 60/40": "#145A32", "US Fixed Income": "#145A32",
-    }
-
+def page_fund_universe(pdf, pnum, total_pages):
     all_rows = []
-    for i, (ticker, (fund, bench, name)) in enumerate(PRESET_PAIRS.items()):
-        all_rows.append([str(i + 1), fund, name, bench,
-                         asset_classes[i] if i < len(asset_classes) else "Other",
-                         "Jan 2005", "19.81"])
+    for i, (key, (fund, bench, name)) in enumerate(PRESET_PAIRS.items()):
+        ac = _asset_class(fund, bench)
+        all_rows.append([str(i + 1), fund, name, bench, ac, "Jan 2005", "19.81"])
 
-    rows_per_page = 20
-    total_fund_pages = int(np.ceil(len(all_rows) / rows_per_page))
+    total_fund_pages = max(1, int(np.ceil(len(all_rows) / UNIVERSE_PER_PAGE)))
     headers = ["#", "Ticker", "Fund Name", "Benchmark", "Asset Class", "Start", "h"]
     col_x   = [0.035, 0.075, 0.175, 0.545, 0.640, 0.760, 0.855]
 
     for fp in range(total_fund_pages):
-        chunk = all_rows[fp * rows_per_page:(fp + 1) * rows_per_page]
+        chunk = all_rows[fp * UNIVERSE_PER_PAGE:(fp + 1) * UNIVERSE_PER_PAGE]
         fig   = plt.figure(figsize=(11, 8.5))
         fig.patch.set_facecolor(WHITE)
 
@@ -302,57 +338,202 @@ def page_fund_universe(pdf):
                                   facecolor=bg, edgecolor="none",
                                   transform=fig.transFigure)
             fig.add_artist(rect)
-            ac_col = color_map.get(row[4], NAVY)
+            ac_col = ASSET_CLASS_COLORS.get(row[4], NAVY)
             for j, (val, x) in enumerate(zip(row, col_x)):
                 col = ac_col if j == 4 else NAVY
-                fig.text(x, yrow + row_h * 0.25, val,
-                         fontsize=7.5, va="center", color=col)
+                fig.text(x, yrow + row_h * 0.25, val, fontsize=7.5, va="center", color=col)
 
-        # Legend (first page only)
+        # Legend on first page only
         if fp == 0:
             legend_y = max(0.04, y_start - (len(chunk) + 1) * row_h - 0.01)
             legend_items = [
                 (NAVY,     "US Equity (FCNTX, DODGX, AGTHX, OTCFX, FMAGX, SEQUX, FLPSX)"),
-                ("#1A5276", "Intl & Emerging Markets (OAKIX, TEDMX, DODWX, + 27 EM funds)"),
+                ("#1A5276", "Intl & Emerging Markets (OAKIX, TEDMX, DODWX, + 26 EM equity funds)"),
                 ("#145A32", "Fixed Income / Balanced (VWELX, PTTRX, PRWCX, LSBRX)"),
+                ("#6E2F8A", "EM Debt: Hard CCY vs EMB (PEBIX, EBNDX, PREMX ...) & Local CCY vs EMLC"),
+                ("#7D6608", "Global Equity vs ACWI / URTH (CWGIX, VHGEX, AIVSX ... + AIAIM funds)"),
             ]
             for li, (col, label) in enumerate(legend_items):
-                fig.text(0.06, legend_y - li * 0.020, f"  {label}",
-                         fontsize=8, color=col)
+                fig.text(0.06, legend_y - li * 0.018, f"  {label}", fontsize=7.5, color=col)
 
-        page_footer(fig, 3)
+        page_footer(fig, pnum[0], total_pages)
+        pnum[0] += 1
         pdf.savefig(fig, bbox_inches="tight")
         plt.close(fig)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PAGE 4 — Summary Results
+# PAGES — Summary Results
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def page_summary(pdf, all_results):
-    """Renders summary results across as many pages as needed (18 rows per page)."""
-    headers = ["Fund", "Bench", "Months", "Ann TE", "IR (95% CI)", "Cum Excess",
-               "# Alarms", "Alarm?", "First Alarm"]
-    col_x   = [0.035, 0.098, 0.163, 0.228, 0.300, 0.445, 0.555, 0.630, 0.715]
+def page_summary(pdf, all_results, pnum, total_pages):
+    # Columns: Fund | Bench | IR (95%CI) | t-stat | Hit% | Up/Dn Cap | CumExc | #Al | Alarm | Date | Regime
+    headers = ["Fund", "Bench", "IR (95% CI)", "t-stat", "Hit%",
+               "Up/Dn Cap", "Cum Exc", "#Al", "Alarm?", "First Alarm", "Regime"]
+    col_x   = [0.030, 0.085, 0.145, 0.315, 0.375, 0.430, 0.530, 0.600, 0.645, 0.705, 0.840]
 
-    rows_per_page  = 18
-    total_sum_pages = int(np.ceil(len(all_results) / rows_per_page))
+    total_sum_pages = max(1, int(np.ceil(len(all_results) / SUMMARY_PER_PAGE)))
 
-    alarm_funds = [r for r in all_results if r["alarm"]]
-    clean_funds = [r for r in all_results if not r["alarm"]]
-    best_ir     = max(all_results, key=lambda x: x["ir"])
-    most_alarms = max(all_results, key=lambda x: x.get("n_alarms", 0))
+    alarm_funds  = [r for r in all_results if r["alarm"]]
+    clean_funds  = [r for r in all_results if not r["alarm"]]
+    best_ir      = max(all_results, key=lambda x: x["ir"])
+    most_alarms  = max(all_results, key=lambda x: x.get("n_alarms", 0))
+    n_funds      = len(all_results)
+    # Expected false alarms per year at h=19.81 (ARL=60m per fund, IR=+0.5)
+    exp_fa_yr    = round(n_funds * 12 / 60, 1)
+    gfc_alarms   = sum(1 for r in alarm_funds if r.get("regime") == "GFC")
+    covid_alarms = sum(1 for r in alarm_funds if r.get("regime") == "COVID")
 
     for sp in range(total_sum_pages):
-        chunk = all_results[sp * rows_per_page:(sp + 1) * rows_per_page]
+        chunk = all_results[sp * SUMMARY_PER_PAGE:(sp + 1) * SUMMARY_PER_PAGE]
         fig   = plt.figure(figsize=(11, 8.5))
         fig.patch.set_facecolor(WHITE)
 
-        subtitle = (f"CUSUM alarm status and key statistics (Jan 2005 - present) "
-                    f"— page {sp+1} of {total_sum_pages}"
-                    if total_sum_pages > 1 else
-                    "CUSUM alarm status and key statistics (Jan 2005 - present)")
+        subtitle = (f"Risk-adjusted statistics (Jan 2005 — present, 24m calibration excluded)"
+                    + (f"  —  page {sp+1} of {total_sum_pages}" if total_sum_pages > 1 else ""))
         fig.text(0.5, 0.96, "Summary Results", ha="center", fontsize=20,
+                 fontweight="bold", color=NAVY)
+        fig.text(0.5, 0.928, subtitle, ha="center", fontsize=9, color="grey")
+
+        header_rect = FancyBboxPatch((0.025, 0.878), 0.95, 0.026,
+                                     boxstyle="round,pad=0.003",
+                                     facecolor=NAVY, edgecolor="none",
+                                     transform=fig.transFigure)
+        fig.add_artist(header_rect)
+        for hdr, x in zip(headers, col_x):
+            fig.text(x, 0.884, hdr, fontsize=7, fontweight="bold", color=WHITE, va="center")
+
+        row_h   = min(0.040, 0.72 / max(len(chunk), 1))
+        y_start = 0.862
+
+        for r, res in enumerate(chunk):
+            bg   = LGREY if r % 2 == 0 else WHITE
+            yrow = y_start - (r + 1) * row_h
+            rect = FancyBboxPatch((0.025, yrow - 0.004), 0.95, row_h - 0.003,
+                                   boxstyle="round,pad=0.002",
+                                   facecolor=bg, edgecolor="none",
+                                   transform=fig.transFigure)
+            fig.add_artist(rect)
+
+            alarm_col  = RED   if res["alarm"] else GREEN
+            alarm_text = "YES" if res["alarm"] else "NO"
+
+            # IR colour: green if statistically sig positive, red if negative
+            t = res.get("t_stat", 0) or 0
+            ir_col = GREEN if t > 1.65 else (RED if res["ir"] < 0 else NAVY)
+
+            ci_str  = (f"{res['ir']:+.2f} [{res['ir_lo']:+.2f},{res['ir_hi']:+.2f}]"
+                       if "ir_lo" in res else f"{res['ir']:+.2f}")
+            t_str   = f"{res.get('t_stat', 0):+.2f}" if res.get('t_stat') is not None else "-"
+            hit_str = f"{res.get('hit_rate', 0):.0%}" if res.get('hit_rate') is not None else "-"
+
+            uc = res.get("up_cap")
+            dc = res.get("dn_cap")
+            cap_str = (f"{uc:.0%}/{dc:.0%}"
+                       if uc is not None and dc is not None and uc == uc and dc == dc
+                       else "-")
+            cap_col = (GREEN if uc is not None and dc is not None
+                       and uc == uc and dc == dc and uc > 1.0 and dc < 1.0
+                       else NAVY)
+
+            regime = res.get("regime", "")
+            regime_col = RED if regime else NAVY
+            # Short history flag
+            fund_label = res["fund"] + ("*" if res.get("short_hist") else "")
+
+            vals   = [fund_label, res["bench"], ci_str, t_str, hit_str,
+                      cap_str, f"{res['cum_excess']:+.1%}",
+                      str(res.get("n_alarms", "-")), alarm_text,
+                      res["alarm_date"], regime]
+            colors = [NAVY if not res.get("short_hist") else "#7D6608",
+                      NAVY, ir_col, ir_col, NAVY,
+                      cap_col, NAVY, NAVY, alarm_col, alarm_col, regime_col]
+
+            for val, x, col in zip(vals, col_x, colors):
+                fig.text(x, yrow + row_h * 0.25, val, fontsize=6.8, va="center",
+                         color=col, fontweight="bold" if col != NAVY else "normal")
+
+        # ── Multiple-testing callout + key observations on last page ──────────
+        if sp == total_sum_pages - 1:
+            obs_y = max(0.03, y_start - (len(chunk) + 1) * row_h - 0.005)
+            box_h = min(0.145, obs_y - 0.03)
+            ax_obs = fig.add_axes([0.025, 0.03, 0.95, box_h])
+            ax_obs.set_facecolor("#FDF2E9")
+            for s in ax_obs.spines.values():
+                s.set_visible(False)
+            ax_obs.set_xticks([]); ax_obs.set_yticks([])
+
+            clean_tickers = ", ".join(r["fund"] for r in clean_funds[:4])
+            extra = "..." if len(clean_funds) > 4 else ""
+
+            ax_obs.text(0.5, 0.97,
+                        "Multiple-Testing Caution  |  Key Observations",
+                        ha="center", va="top", fontsize=8.5, fontweight="bold",
+                        color=RED, transform=ax_obs.transAxes)
+            obs = (
+                f"  MULTIPLE TESTING: With {n_funds} funds at h=19.81 (ARL=60m per fund), "
+                f"expected FALSE alarms = {exp_fa_yr:.1f}/year across the universe. "
+                f"GFC alarms: {gfc_alarms}  |  COVID alarms: {covid_alarms}  "
+                f"— these are regime signals, not skill-loss signals.\n"
+                f"  * = Short monitoring history (<{MIN_MONITORING_MONTHS}m live CUSUM; treat results cautiously).\n"
+                f"  {len(alarm_funds)}/{n_funds} alarmed. "
+                f"Clean: {clean_tickers}{extra}.  "
+                f"Best IR: {best_ir['fund']} ({best_ir['ir']:+.2f}, "
+                f"t={best_ir.get('t_stat', 0):+.1f}).  "
+                f"Most alarms: {most_alarms['fund']} ({most_alarms.get('n_alarms', 0)}x)."
+            )
+            ax_obs.text(0.01, 0.72, obs, va="top", fontsize=7.5, color="#333333",
+                        transform=ax_obs.transAxes, linespacing=1.55)
+
+        page_footer(fig, pnum[0], total_pages)
+        pnum[0] += 1
+        pdf.savefig(fig, bbox_inches="tight")
+        plt.close(fig)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAGES — Post-Alarm Analysis (paginated, 14 rows per page)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def page_post_alarm(pdf, all_results, all_post_alarm, pnum, total_pages):
+    # Added Sig% column = % of ALL alarms where fund underperformed at 12M
+    headers = ["Fund", "First Alarm", "+12M Fund", "+12M Bench", "+12M Exc",
+               "+24M Exc", "+36M Exc", "1st Sig", "#Al", "Sig%(all)"]
+    col_x   = [0.030, 0.105, 0.200, 0.285, 0.368, 0.455, 0.540, 0.625, 0.710, 0.775]
+
+    def _fmt(v):
+        return f"{v:+.1%}" if v == v else "n/a"   # nan check
+
+    # Collect all displayable rows upfront
+    display_rows = []
+    for res, pa_df in zip(all_results, all_post_alarm):
+        if not res["alarm"] or pa_df is None or pa_df.empty:
+            continue
+        first_t  = pa_df["alarm_t"].min()
+        fa       = pa_df[pa_df["alarm_t"] == first_t]
+        row12    = fa[fa["horizon"] == 12]
+        row24    = fa[fa["horizon"] == 24]
+        row36    = fa[fa["horizon"] == 36]
+        if row12.empty:
+            continue
+        d12     = row12.iloc[0]
+        exc12   = d12["excess_cum"]
+        exc24   = row24.iloc[0]["excess_cum"] if not row24.empty else np.nan
+        exc36   = row36.iloc[0]["excess_cum"] if not row36.empty else np.nan
+        correct = d12["correct_alarm"]
+        display_rows.append((res, d12, exc12, exc24, exc36, correct))
+
+    no_alarm = [res["fund"] for res in all_results if not res["alarm"]]
+    n_pa_pages = max(1, int(np.ceil(len(display_rows) / POST_ALARM_PER_PAGE)))
+
+    for pp in range(n_pa_pages):
+        chunk = display_rows[pp * POST_ALARM_PER_PAGE:(pp + 1) * POST_ALARM_PER_PAGE]
+        fig   = plt.figure(figsize=(11, 8.5))
+        fig.patch.set_facecolor(WHITE)
+
+        subtitle = (f"Cumulative excess return vs benchmark in the months following the FIRST alarm"
+                    + (f"  —  page {pp+1} of {n_pa_pages}" if n_pa_pages > 1 else ""))
+        fig.text(0.5, 0.96, "Post-Alarm Analysis", ha="center", fontsize=20,
                  fontweight="bold", color=NAVY)
         fig.text(0.5, 0.928, subtitle, ha="center", fontsize=10, color="grey")
 
@@ -364,171 +545,81 @@ def page_summary(pdf, all_results):
         for hdr, x in zip(headers, col_x):
             fig.text(x, 0.884, hdr, fontsize=8, fontweight="bold", color=WHITE, va="center")
 
-        row_h   = min(0.042, 0.75 / max(len(chunk), 1))
-        y_start = 0.862
+        row_h   = 0.048
+        y_start = 0.845
 
-        for r, res in enumerate(chunk):
-            bg        = LGREY if r % 2 == 0 else WHITE
-            yrow      = y_start - (r + 1) * row_h
-            rect      = FancyBboxPatch((0.03, yrow - 0.004), 0.94, row_h - 0.003,
-                                       boxstyle="round,pad=0.002",
-                                       facecolor=bg, edgecolor="none",
-                                       transform=fig.transFigure)
+        for r, (res, d12, exc12, exc24, exc36, correct) in enumerate(chunk):
+            bg   = LGREY if r % 2 == 0 else WHITE
+            yrow = y_start - r * row_h
+            rect = FancyBboxPatch((0.03, yrow - 0.013), 0.94, 0.043,
+                                  boxstyle="round,pad=0.002",
+                                  facecolor=bg, edgecolor="none",
+                                  transform=fig.transFigure)
             fig.add_artist(rect)
 
-            alarm_col  = RED   if res["alarm"] else GREEN
-            alarm_text = "YES" if res["alarm"] else "NO"
-            ir_col     = (GREEN if res["ir"] > 0.3 else (RED if res["ir"] < 0.1 else NAVY))
-            ci_str     = (f"{res['ir']:+.2f} [{res['ir_lo']:+.2f},{res['ir_hi']:+.2f}]"
-                          if "ir_lo" in res else f"{res['ir']:+.2f}")
+            signal_col  = GREEN if correct else RED
+            signal_text = "CORRECT" if correct else "FALSE"
+            exc12_col   = RED if not (exc12 != exc12) and exc12 < 0 else GREEN
+            exc24_col   = RED if not (exc24 != exc24) and exc24 < 0 else GREEN
+            exc36_col   = RED if not (exc36 != exc36) and exc36 < 0 else GREEN
 
-            vals   = [res["fund"], res["bench"], str(res["months"]),
-                      f"{res['te']:.1%}", ci_str, f"{res['cum_excess']:+.1%}",
-                      str(res.get("n_alarms", "-")), alarm_text, res["alarm_date"]]
-            colors = [NAVY, NAVY, NAVY, NAVY, ir_col, NAVY, NAVY, alarm_col, alarm_col]
+            # Signal quality across ALL alarms at 12M horizon
+            sq     = res.get("sig_quality")
+            sq_str = f"{sq:.0%}" if sq is not None else "n/a"
+            sq_col = (GREEN if sq is not None and sq > 0.6 else
+                      (RED if sq is not None and sq < 0.4 else NAVY))
+
+            vals   = [res["fund"], res["alarm_date"],
+                      _fmt(d12["fund_cum"]), _fmt(d12["bench_cum"]),
+                      _fmt(exc12), _fmt(exc24), _fmt(exc36),
+                      signal_text, str(res.get("n_alarms", "-")), sq_str]
+            colors = [NAVY, NAVY, NAVY, NAVY,
+                      exc12_col, exc24_col, exc36_col,
+                      signal_col, NAVY, sq_col]
 
             for val, x, col in zip(vals, col_x, colors):
-                fig.text(x, yrow + row_h * 0.3, val, fontsize=7.5, va="center",
+                fig.text(x, yrow + 0.008, val, fontsize=8, va="center",
                          color=col, fontweight="bold" if col != NAVY else "normal")
 
-        # Key observations box on last page only
-        if sp == total_sum_pages - 1:
-            obs_y = max(0.03, y_start - (len(chunk) + 1) * row_h - 0.01)
-            ax_obs = fig.add_axes([0.04, obs_y, 0.92, min(0.13, obs_y + 0.10)])
-            ax_obs.set_facecolor("#EAF2FF")
-            for s in ax_obs.spines.values():
-                s.set_visible(False)
-            ax_obs.set_xticks([]); ax_obs.set_yticks([])
-            ax_obs.text(0.5, 0.95, "Key Observations", ha="center", va="top",
-                        fontsize=9, fontweight="bold", color=NAVY,
-                        transform=ax_obs.transAxes)
-            obs = (
-                f"  {len(alarm_funds)} of {len(all_results)} managers triggered an alarm. "
-                f"Clean record: {', '.join(f['fund'] for f in clean_funds[:5])}{'...' if len(clean_funds) > 5 else ''}.\n"
-                f"  Strongest IR: {best_ir['fund']} ({best_ir['ir']:+.2f}), "
-                f"cum excess {best_ir['cum_excess']:+.1%}.  "
-                f"Most re-alarms: {most_alarms['fund']} ({most_alarms.get('n_alarms', 0)}x)."
-            )
-            ax_obs.text(0.02, 0.62, obs, va="top", fontsize=8, color="#333333",
-                        transform=ax_obs.transAxes, linespacing=1.6)
+        # Footer content on last post-alarm page
+        if pp == n_pa_pages - 1:
+            last_row_y = y_start - (len(chunk) - 1) * row_h
+            note_y     = max(0.165, last_row_y - 0.055)
 
-        page_footer(fig, 4)
+            if no_alarm:
+                fig.text(0.035, note_y,
+                         f"No alarm (no post-alarm analysis): {', '.join(no_alarm)}",
+                         fontsize=8.5, color=GREEN, fontstyle="italic")
+
+            ax_exp = fig.add_axes([0.04, 0.03, 0.92, 0.130])
+            ax_exp.set_facecolor(LGREY)
+            for sp in ax_exp.spines.values():
+                sp.set_visible(False)
+            ax_exp.set_xticks([]); ax_exp.set_yticks([])
+            ax_exp.text(0.5, 0.93, "How to Read This Table", ha="center", va="top",
+                        fontsize=10, fontweight="bold", color=NAVY,
+                        transform=ax_exp.transAxes)
+            ax_exp.text(0.03, 0.68,
+                        "  +12M/+24M/+36M: cumulative excess return (fund minus benchmark) in the months AFTER the FIRST alarm.\n"
+                        "  1st Sig: CORRECT if fund underperformed after first alarm (signal validated). FALSE = false positive.\n"
+                        "  Sig%(all): % of ALL alarms (rolling restart) where fund underperformed at +12M. "
+                        ">60% = reliable signal. 50% = coin flip. "
+                        "At h=19.81, false-alarm rate = 1 per 60 months PER FUND — "
+                        "across a 67-fund universe expect ~13 false alarms per year.",
+                        va="top", fontsize=8, color="#333333",
+                        transform=ax_exp.transAxes, linespacing=1.65)
+
+        page_footer(fig, pnum[0], total_pages)
+        pnum[0] += 1
         pdf.savefig(fig, bbox_inches="tight")
         plt.close(fig)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PAGE 5 — Post-Alarm Analysis
+# PAGE — Waterfall Chart
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def page_post_alarm(pdf, all_results, all_post_alarm):
-    fig = plt.figure(figsize=(11, 8.5))
-    fig.patch.set_facecolor(WHITE)
-
-    fig.text(0.5, 0.96, "Post-Alarm Analysis", ha="center", fontsize=20,
-             fontweight="bold", color=NAVY)
-    fig.text(0.5, 0.928,
-             "Cumulative excess return vs benchmark in the months following the FIRST alarm",
-             ha="center", fontsize=11, color="grey")
-
-    headers = ["Fund", "First Alarm", "+12M Fund", "+12M Bench", "+12M Excess",
-               "+24M Excess", "+36M Excess", "12M Signal"]
-    col_x   = [0.035, 0.115, 0.220, 0.310, 0.400, 0.500, 0.595, 0.690]
-
-    header_rect = FancyBboxPatch((0.03, 0.878), 0.94, 0.026,
-                                 boxstyle="round,pad=0.003",
-                                 facecolor=NAVY, edgecolor="none",
-                                 transform=fig.transFigure)
-    fig.add_artist(header_rect)
-    for hdr, x in zip(headers, col_x):
-        fig.text(x, 0.884, hdr, fontsize=8, fontweight="bold", color=WHITE, va="center")
-
-    def _fmt(v):
-        return f"{v:+.1%}" if not (v != v) else "n/a"  # nan check
-
-    r = 0
-    for res, pa_df in zip(all_results, all_post_alarm):
-        if not res["alarm"] or pa_df is None or pa_df.empty:
-            continue
-
-        # Use only the first alarm row for each horizon
-        first_alarm_rows = pa_df[pa_df["alarm_t"] == pa_df["alarm_t"].min()]
-        row12 = first_alarm_rows[first_alarm_rows["horizon"] == 12]
-        row24 = first_alarm_rows[first_alarm_rows["horizon"] == 24]
-        row36 = first_alarm_rows[first_alarm_rows["horizon"] == 36]
-
-        if row12.empty:
-            continue
-
-        d12 = row12.iloc[0]
-        exc12 = d12["excess_cum"]
-        exc24 = row24.iloc[0]["excess_cum"] if not row24.empty else np.nan
-        exc36 = row36.iloc[0]["excess_cum"] if not row36.empty else np.nan
-        correct = d12["correct_alarm"]
-
-        bg   = LGREY if r % 2 == 0 else WHITE
-        yrow = 0.845 - r * 0.048
-        rect = FancyBboxPatch((0.03, yrow - 0.013), 0.94, 0.043,
-                              boxstyle="round,pad=0.002",
-                              facecolor=bg, edgecolor="none",
-                              transform=fig.transFigure)
-        fig.add_artist(rect)
-
-        signal_col  = GREEN if correct else RED
-        signal_text = "CORRECT" if correct else "FALSE"
-        exc12_col   = RED if not (exc12 != exc12) and exc12 < 0 else GREEN
-
-        vals   = [res["fund"], res["alarm_date"],
-                  _fmt(d12["fund_cum"]), _fmt(d12["bench_cum"]),
-                  _fmt(exc12), _fmt(exc24), _fmt(exc36), signal_text]
-        colors = [NAVY, NAVY, NAVY, NAVY, exc12_col,
-                  (RED if not (exc24 != exc24) and exc24 < 0 else GREEN),
-                  (RED if not (exc36 != exc36) and exc36 < 0 else GREEN),
-                  signal_col]
-
-        for val, x, col in zip(vals, col_x, colors):
-            fig.text(x, yrow + 0.008, val, fontsize=8, va="center",
-                     color=col, fontweight="bold" if col != NAVY else "normal")
-        r += 1
-
-    # No alarm funds
-    no_alarm = [res["fund"] for res in all_results if not res["alarm"]]
-    if no_alarm:
-        yrow = 0.845 - r * 0.048 - 0.02
-        fig.text(0.035, yrow,
-                 f"No alarm (no post-alarm analysis): {', '.join(no_alarm)}",
-                 fontsize=8.5, color=GREEN, fontstyle="italic")
-
-    # Explanation box
-    ax_exp = fig.add_axes([0.04, 0.03, 0.92, 0.130])
-    ax_exp.set_facecolor(LGREY)
-    for sp in ax_exp.spines.values():
-        sp.set_visible(False)
-    ax_exp.set_xticks([]); ax_exp.set_yticks([])
-
-    ax_exp.text(0.5, 0.93, "How to Read This Table", ha="center", va="top",
-                fontsize=10, fontweight="bold", color=NAVY,
-                transform=ax_exp.transAxes)
-    ax_exp.text(0.03, 0.68,
-                "  +12M / +24M / +36M Excess: cumulative return of the fund minus the benchmark "
-                "in the 12, 24, and 36 months immediately AFTER the first alarm.\n"
-                "  CORRECT: The fund underperformed its benchmark after the alarm (negative excess) "
-                "— the CUSUM signal was validated by subsequent returns.\n"
-                "  FALSE: The fund outperformed after the alarm — the signal was a false positive. "
-                "At h=19.81, theory predicts ~1 false alarm per 60 months.",
-                va="top", fontsize=8.5, color="#333333",
-                transform=ax_exp.transAxes, linespacing=1.7)
-
-    page_footer(fig, 5)
-    pdf.savefig(fig, bbox_inches="tight")
-    plt.close(fig)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE 6 — Waterfall Chart
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def page_waterfall(pdf, all_results):
+def page_waterfall(pdf, all_results, pnum, total_pages):
     fig = plt.figure(figsize=(11, 8.5))
     fig.patch.set_facecolor(WHITE)
 
@@ -538,7 +629,7 @@ def page_waterfall(pdf, all_results):
              "Total return of each fund vs its benchmark (Jan 2005 - present)",
              ha="center", fontsize=11, color="grey")
 
-    ax = fig.add_axes([0.22, 0.10, 0.70, 0.80])
+    ax = fig.add_axes([0.25, 0.05, 0.68, 0.86])
 
     sorted_res = sorted(all_results, key=lambda x: x["cum_excess"])
     labels = [f"{r['fund']} vs {r['bench']}" for r in sorted_res]
@@ -546,48 +637,46 @@ def page_waterfall(pdf, all_results):
     colors = [GREEN if v >= 0 else RED for v in values]
     alarm  = [r["alarm"] for r in sorted_res]
 
-    bars = ax.barh(labels, values, color=colors, height=0.6, edgecolor="white", lw=0.5)
+    # Dynamic bar height: thinner as fund count grows
+    bar_h = max(0.3, min(0.7, 20 / max(len(sorted_res), 1)))
+    bars  = ax.barh(labels, values, color=colors, height=bar_h,
+                    edgecolor="white", lw=0.4)
 
-    # Value labels
     for bar, val, alm in zip(bars, values, alarm):
         x_pos = val + 0.003 if val >= 0 else val - 0.003
         ha    = "left" if val >= 0 else "right"
-        label = f"{val:+.1%}"
-        if alm:
-            label += " *"
+        label = f"{val:+.1%}" + (" *" if alm else "")
         ax.text(x_pos, bar.get_y() + bar.get_height() / 2,
-                label, va="center", ha=ha, fontsize=9,
+                label, va="center", ha=ha,
+                fontsize=max(5.5, min(8, 200 / max(len(sorted_res), 1))),
                 color=GREEN if val >= 0 else RED, fontweight="bold")
 
     ax.axvline(0, color=NAVY, lw=1.2)
     ax.set_xlabel("Cumulative excess return vs benchmark", fontsize=10, color=NAVY)
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.0%}"))
-    ax.tick_params(axis="y", labelsize=9)
+    ax.tick_params(axis="y", labelsize=max(5, min(8, 200 / max(len(sorted_res), 1))))
     ax.tick_params(axis="x", labelsize=9)
     ax.set_facecolor(LGREY)
     ax.grid(axis="x", alpha=0.4, lw=0.6)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
-    # Legend
     legend_elements = [
         mpatches.Patch(facecolor=GREEN, label="Outperformed benchmark"),
         mpatches.Patch(facecolor=RED,   label="Underperformed benchmark"),
         plt.Line2D([0], [0], color="none", label="* = CUSUM alarm triggered"),
     ]
-    ax.legend(handles=legend_elements, loc="lower right", fontsize=9,
-              framealpha=0.9)
+    ax.legend(handles=legend_elements, loc="lower right", fontsize=9, framealpha=0.9)
 
-    page_footer(fig, 6)
+    page_footer(fig, pnum[0], total_pages)
+    pnum[0] += 1
     pdf.savefig(fig, bbox_inches="tight")
     plt.close(fig)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PAGE 7+ — Individual Fund Charts (6 per page, 3 rows x 2 cols)
+# PAGES — Individual Fund Charts (6 per page, 3 rows × 2 cols)
 # ═══════════════════════════════════════════════════════════════════════════════
-
-FUNDS_PER_PLOT_PAGE = 6   # 3 rows × 2 cols — large enough to read clearly
 
 def _draw_fund_chart(fig, outer, slot, res, rets, mon):
     """Draw one fund's two-panel chart into a GridSpec slot."""
@@ -613,15 +702,13 @@ def _draw_fund_chart(fig, outer, slot, res, rets, mon):
     ax1.grid(alpha=0.3, lw=0.5)
 
     # Panel 2: lower CUSUM (L) and upper CUSUM (L_up)
-    ax2.plot(x, df["L"],    lw=1.2, color=NAVY, label="L (loss)")
+    ax2.plot(x, df["L"],    lw=1.2, color=NAVY,  label="L (loss)")
     ax2.plot(x, df["L_up"], lw=0.9, color=GREEN, ls="--", label="L_up (gain)")
-    ax2.axhline(mon.threshold, color=RED, ls="--", lw=0.8,
-                label=f"h={mon.threshold}")
+    ax2.axhline(mon.threshold, color=RED, ls="--", lw=0.8, label=f"h={mon.threshold}")
     ax2.invert_yaxis()
     ax2.set_facecolor(LGREY)
     ax2.grid(alpha=0.3, lw=0.5)
 
-    # Mark all skill-loss alarm lines
     for at in mon.all_alarms:
         ax2.axvline(at, color=RED, lw=0.7, alpha=0.5)
     if mon.alarm_t and dates is not None and mon.alarm_t <= len(dates):
@@ -630,7 +717,6 @@ def _draw_fund_chart(fig, outer, slot, res, rets, mon):
                  mon.threshold * 0.55, f"^{d_str}",
                  color=RED, fontsize=6, fontweight="bold")
 
-    # x-axis date labels
     if dates is not None and len(dates) >= len(x):
         tick_locs = [t for t in ax2.get_xticks() if 0 < int(t) <= len(dates)]
         ax2.set_xticks(tick_locs)
@@ -638,7 +724,6 @@ def _draw_fund_chart(fig, outer, slot, res, rets, mon):
             [dates[int(t) - 1].strftime("%Y") for t in tick_locs],
             fontsize=6, rotation=45)
 
-    # Stats annotation
     n_al   = len(mon.all_alarms)
     status = f"ALARM {res['alarm_date']} ({n_al}x)" if res["alarm"] else "No Alarm"
     s_col  = RED if res["alarm"] else GREEN
@@ -650,14 +735,13 @@ def _draw_fund_chart(fig, outer, slot, res, rets, mon):
                        edgecolor=s_col, alpha=0.9))
 
 
-def page_fund_plots(pdf, all_rets, all_monitors, all_results):
-    """Renders individual fund CUSUM charts, 6 per page."""
+def page_fund_plots(pdf, all_rets, all_monitors, all_results, pnum, total_pages):
     n_funds      = len(all_results)
-    n_plot_pages = int(np.ceil(n_funds / FUNDS_PER_PLOT_PAGE))
+    n_plot_pages = max(1, int(np.ceil(n_funds / FUNDS_PER_PLOT_PAGE)))
 
     for pp in range(n_plot_pages):
-        chunk_res  = all_results[pp * FUNDS_PER_PLOT_PAGE:(pp + 1) * FUNDS_PER_PLOT_PAGE]
-        chunk_rets = all_rets   [pp * FUNDS_PER_PLOT_PAGE:(pp + 1) * FUNDS_PER_PLOT_PAGE]
+        chunk_res  = all_results [pp * FUNDS_PER_PLOT_PAGE:(pp + 1) * FUNDS_PER_PLOT_PAGE]
+        chunk_rets = all_rets    [pp * FUNDS_PER_PLOT_PAGE:(pp + 1) * FUNDS_PER_PLOT_PAGE]
         chunk_mon  = all_monitors[pp * FUNDS_PER_PLOT_PAGE:(pp + 1) * FUNDS_PER_PLOT_PAGE]
 
         n_in_chunk = len(chunk_res)
@@ -677,7 +761,8 @@ def page_fund_plots(pdf, all_rets, all_monitors, all_results):
         for slot, (res, rets, mon) in enumerate(zip(chunk_res, chunk_rets, chunk_mon)):
             _draw_fund_chart(fig, outer, slot, res, rets, mon)
 
-        page_footer(fig, 7)
+        page_footer(fig, pnum[0], total_pages)
+        pnum[0] += 1
         pdf.savefig(fig, bbox_inches="tight")
         plt.close(fig)
 
@@ -687,11 +772,9 @@ def page_fund_plots(pdf, all_rets, all_monitors, all_results):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def export_html(all_results, all_post_alarm, output_path="cusum_report.html"):
-    """Generate a self-contained HTML report with embedded base64 images."""
-
     def tbl_row(cells, header=False, colors=None):
-        tag   = "th" if header else "td"
-        cols  = colors or [""] * len(cells)
+        tag        = "th" if header else "td"
+        cols       = colors or [""] * len(cells)
         cells_html = "".join(
             f'<{tag} style="color:{c};font-weight:{"bold" if c else "normal"}">'
             f'{v}</{tag}>'
@@ -699,9 +782,9 @@ def export_html(all_results, all_post_alarm, output_path="cusum_report.html"):
         )
         return f"<tr>{cells_html}</tr>"
 
-    # Summary table HTML
     summary_rows = tbl_row(
-        ["Fund", "Bench", "Months", "Ann TE", "IR", "Cum Excess", "#Alarms", "Alarm?", "First Alarm"],
+        ["Fund", "Bench", "Months", "Ann TE", "IR", "Cum Excess",
+         "#Alarms", "Alarm?", "First Alarm"],
         header=True)
     for res in all_results:
         alarm_col = "#C0392B" if res["alarm"] else "#1E8449"
@@ -713,7 +796,6 @@ def export_html(all_results, all_post_alarm, output_path="cusum_report.html"):
              "YES" if res["alarm"] else "NO", res["alarm_date"]],
             colors=["", "", "", "", ir_col, "", "", alarm_col, alarm_col])
 
-    # Post-alarm table HTML
     pa_rows = tbl_row(
         ["Fund", "Alarm Date", "+12M Fund", "+12M Bench", "+12M Excess",
          "+24M Excess", "+36M Excess", "Signal"],
@@ -805,6 +887,9 @@ class MonitorResult:
         self.history_df = history_df
 
 
+CALIB_MONTHS = 24   # must match CUSUMMonitor default
+
+
 def collect_data():
     all_rets, all_monitors, all_results, all_post_alarm = [], [], [], []
     print("Fetching data from Yahoo Finance...")
@@ -813,39 +898,59 @@ def collect_data():
         try:
             rets = load_from_yfinance(fund, bench)
 
-            seed       = rets.iloc[: min(24, max(6, len(rets) // 4))]
-            excess_s   = seed["portfolio"] - seed["benchmark"]
-            init_te    = excess_s.std() * np.sqrt(12)
+            # Initialise sigma from calibration window only
+            calib   = rets.iloc[:CALIB_MONTHS]
+            excess_s = calib["portfolio"] - calib["benchmark"]
+            init_te  = max(excess_s.std() * np.sqrt(12), 0.01)   # floor at 1%
 
-            monitor    = CUSUMMonitor(initial_te=init_te, threshold=19.81)
+            monitor    = CUSUMMonitor(initial_te=init_te, threshold=19.81,
+                                      calibration_months=CALIB_MONTHS)
             history_df = monitor.run(rets)
 
-            excess     = rets["portfolio"] - rets["benchmark"]
-            ir         = (excess.mean() * 12) / (excess.std() * np.sqrt(12))
-            te         = excess.std() * np.sqrt(12)
-            cum        = (1 + rets["portfolio"]).prod() / (1 + rets["benchmark"]).prod() - 1
+            # Full-series stats (log excess, consistent with CUSUM)
+            excess_log = np.log((1 + rets["portfolio"]) / (1 + rets["benchmark"]))
+            ir  = (excess_log.mean() * 12) / (excess_log.std() * np.sqrt(12)) if excess_log.std() > 0 else 0.0
+            te  = excess_log.std() * np.sqrt(12)
+            cum = (1 + rets["portfolio"]).prod() / (1 + rets["benchmark"]).prod() - 1
+
             ir_pt, ir_lo, ir_hi = bootstrap_ir_ci(rets)
+            extra = compute_extra_stats(rets)
 
             alarm_date = (rets.index[monitor.alarm_t - 1].strftime("%b %Y")
                           if monitor.alarm else "-")
+            regime     = alarm_regime(alarm_date)
 
-            pa_df = post_alarm_returns(rets, monitor)
+            pa_df   = post_alarm_returns(rets, monitor)
+            sig_q   = signal_quality(pa_df, horizon=12)
+
+            # History of monitoring-only period for display
+            monitoring_months = len(rets) - CALIB_MONTHS
+            short_hist = monitoring_months < MIN_MONITORING_MONTHS
 
             all_rets.append(rets)
             mr = MonitorResult(monitor, history_df)
             all_monitors.append(mr)
             all_results.append({
-                "fund": fund, "bench": bench, "name": name,
-                "months":    len(rets),
-                "ir":        ir,  "ir_lo": ir_lo, "ir_hi": ir_hi,
-                "te":        te,
-                "cum_excess": cum,
-                "n_alarms":  len(monitor.all_alarms),
-                "alarm":     monitor.alarm,
-                "alarm_date": alarm_date,
+                "fund":        fund,  "bench":  bench,  "name": name,
+                "months":      len(rets),
+                "mon_months":  monitoring_months,
+                "short_hist":  short_hist,
+                "ir":          ir,    "ir_lo": ir_lo,  "ir_hi": ir_hi,
+                "te":          te,
+                "cum_excess":  cum,
+                "hit_rate":    extra["hit_rate"],
+                "t_stat":      extra["t_stat"],
+                "up_cap":      extra["up_cap"],
+                "dn_cap":      extra["dn_cap"],
+                "n_alarms":    len(monitor.all_alarms),
+                "alarm":       monitor.alarm,
+                "alarm_date":  alarm_date,
+                "regime":      regime,
+                "sig_quality": sig_q,
             })
             all_post_alarm.append(pa_df)
-            print("OK")
+            tag = f"[{regime}] " if regime else ""
+            print(f"OK  {tag}({monitoring_months}m live{'  SHORT' if short_hist else ''})")
         except Exception as e:
             print(f"ERROR: {e}")
 
@@ -857,29 +962,40 @@ def collect_data():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
+    import os
     parser = argparse.ArgumentParser(description="CUSUM Report Generator")
-    parser.add_argument("--output", default="cusum_report.pdf",
-                        help="Output PDF path (default: cusum_report.pdf)")
+    parser.add_argument("--output", default=None,
+                        help="Output PDF path (default: output/cusum_report.pdf)")
     parser.add_argument("--html",   action="store_true",
                         help="Also generate self-contained HTML export")
     args = parser.parse_args()
 
+    # Default output directory
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+    os.makedirs(out_dir, exist_ok=True)
+
+    pdf_path  = args.output or os.path.join(out_dir, "cusum_report.pdf")
+    html_path = os.path.join(os.path.dirname(pdf_path), "cusum_report.html")
+
     all_rets, all_monitors, all_results, all_post_alarm = collect_data()
 
-    print(f"\nBuilding PDF -> {args.output}")
-    with PdfPages(args.output) as pdf:
-        page_cover(pdf)                                        # 1
-        page_methodology(pdf)                                  # 2
-        page_fund_universe(pdf)                                # 3
-        page_summary(pdf, all_results)                         # 4
-        page_post_alarm(pdf, all_results, all_post_alarm)      # 5
-        page_waterfall(pdf, all_results)                       # 6
-        page_fund_plots(pdf, all_rets, all_monitors, all_results)  # 7
+    total_pages = compute_total_pages(all_results)
+    pnum        = [1]   # mutable page counter shared across all page functions
 
-    print(f"  PDF saved: {args.output}")
+    print(f"\nBuilding PDF -> {pdf_path}  ({total_pages} pages)")
+    with PdfPages(pdf_path) as pdf:
+        page_cover       (pdf, pnum, total_pages)
+        page_methodology (pdf, pnum, total_pages)
+        page_fund_universe(pdf, pnum, total_pages)
+        page_summary     (pdf, all_results, pnum, total_pages)
+        page_post_alarm  (pdf, all_results, all_post_alarm, pnum, total_pages)
+        page_waterfall   (pdf, all_results, pnum, total_pages)
+        page_fund_plots  (pdf, all_rets, all_monitors, all_results, pnum, total_pages)
+
+    print(f"  PDF saved: {pdf_path}")
 
     if args.html:
-        export_html(all_results, all_post_alarm)
+        export_html(all_results, all_post_alarm, output_path=html_path)
 
     print("Done.")
 

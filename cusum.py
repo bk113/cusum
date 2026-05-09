@@ -74,36 +74,44 @@ class CUSUMMonitor:
 
     Parameters
     ----------
-    initial_te      : annualised tracking-error seed (e.g. 0.04 = 4 %).
-    threshold       : alarm trigger. See THRESHOLD_TABLE. Default 19.81.
-    gamma           : EWMA decay for tracking-error estimate (0.9 per paper).
-    mu_good         : IR considered "good"        (default 0.5).
-    mu_bad          : IR considered "bad"         (default 0.0).
-    mu_exceptional  : IR considered "exceptional" (default 1.0) — upper alarm.
+    initial_te          : annualised tracking-error seed (e.g. 0.04 = 4 %).
+    threshold           : alarm trigger. See THRESHOLD_TABLE. Default 19.81.
+    gamma               : EWMA decay for tracking-error estimate (0.9 per paper).
+    mu_good             : IR considered "good"        (default 0.5).
+    mu_bad              : IR considered "bad"         (default 0.0).
+    mu_exceptional      : IR considered "exceptional" (default 1.0) — upper alarm.
+    calibration_months  : months used ONLY to warm up sigma; L frozen at 0 during
+                          this window so calibration data is not also test data.
+    ir_cap              : winsorise monthly IR_hat to ±ir_cap before accumulating.
+                          Prevents a single crash month from single-handedly
+                          crossing the threshold (e.g. March 2020 alone can
+                          produce |IR_hat| > 40 when EWMA sigma is stale).
     """
-    initial_te:     float = 0.04
-    threshold:      float = 19.81
-    gamma:          float = 0.9
-    mu_good:        float = 0.5
-    mu_bad:         float = 0.0
-    mu_exceptional: float = 1.0
+    initial_te:         float = 0.04
+    threshold:          float = 19.81
+    gamma:              float = 0.9
+    mu_good:            float = 0.5
+    mu_bad:             float = 0.0
+    mu_exceptional:     float = 1.0
+    calibration_months: int   = 24    # L frozen during this window
+    ir_cap:             float = 5.0   # |IR_hat| clipped to this value
 
     # ── lower CUSUM state (skill loss) ──────────────────────────────────────
-    t:             int            = 0
-    L:             float          = 0.0
-    sigma_monthly_sq: float       = field(init=False)
+    t:             int             = 0
+    L:             float           = 0.0
+    sigma_monthly_sq: float        = field(init=False)
     e_prev:        Optional[float] = None
-    alarm:         bool           = False
-    alarm_t:       Optional[int]  = None
-    all_alarms:    List[int]      = field(default_factory=list)
+    alarm:         bool            = False
+    alarm_t:       Optional[int]   = None
+    all_alarms:    List[int]       = field(default_factory=list)
 
     # ── upper CUSUM state (skill gain) ──────────────────────────────────────
-    L_up:          float          = 0.0
-    alarm_up:      bool           = False
-    alarm_up_t:    Optional[int]  = None
-    all_alarms_up: List[int]      = field(default_factory=list)
+    L_up:          float           = 0.0
+    alarm_up:      bool            = False
+    alarm_up_t:    Optional[int]   = None
+    all_alarms_up: List[int]       = field(default_factory=list)
 
-    history:       list           = field(default_factory=list)
+    history:       list            = field(default_factory=list)
 
     def __post_init__(self):
         self.sigma_monthly_sq = (self.initial_te ** 2) / 12.0
@@ -111,11 +119,13 @@ class CUSUMMonitor:
     def update(self, r_portfolio: float, r_benchmark: float) -> dict:
         """Process one month's return pair."""
         self.t += 1
+        in_calibration = (self.t <= self.calibration_months)
 
-        # (1) log excess return
+        # (1) Log excess return
         e = np.log((1 + r_portfolio) / (1 + r_benchmark))
 
         # (2) EWMA tracking-error update (Von Neumann adjacent-difference estimator)
+        #     Runs during calibration AND monitoring — sigma warms up from day 1.
         if self.e_prev is not None:
             innovation = 0.5 * (e - self.e_prev) ** 2
             self.sigma_monthly_sq = (
@@ -123,37 +133,44 @@ class CUSUMMonitor:
             )
         sigma_monthly = np.sqrt(self.sigma_monthly_sq)
 
-        # (3) annualised IR using LAGGED sigma (keeps it ~unbiased)
-        ir_hat = (e * np.sqrt(12)) / sigma_monthly if sigma_monthly > 0 else 0.0
+        # (3) Monthly IR estimate, annualised via sqrt(12), using lagged sigma.
+        #     Winsorised to ±ir_cap: prevents a single crash/euphoria month from
+        #     single-handedly crossing the CUSUM threshold when EWMA sigma is stale.
+        ir_hat_raw = (e * np.sqrt(12)) / sigma_monthly if sigma_monthly > 0 else 0.0
+        ir_hat     = float(np.clip(ir_hat_raw, -self.ir_cap, self.ir_cap))
 
-        # (4) Lower Lindley recursion — accumulates when IR < midpoint(good, bad)
-        drift_down = 0.5 * (self.mu_good + self.mu_bad) - ir_hat
-        self.L = max(0.0, self.L + drift_down)
+        # (4)/(5) Lindley recursions — only AFTER calibration period.
+        #         During calibration the statistic stays at 0 so that the same
+        #         data used to initialise sigma is not also tested against it.
+        if not in_calibration:
+            drift_down = 0.5 * (self.mu_good + self.mu_bad) - ir_hat
+            self.L = max(0.0, self.L + drift_down)
 
-        if self.L >= self.threshold:
-            self.all_alarms.append(self.t)
-            if not self.alarm:          # record first alarm for backward compat
-                self.alarm   = True
-                self.alarm_t = self.t
-            self.L = 0.0               # rolling restart — keep monitoring
+            if self.L >= self.threshold:
+                self.all_alarms.append(self.t)
+                if not self.alarm:
+                    self.alarm   = True
+                    self.alarm_t = self.t
+                self.L = 0.0               # rolling restart — keep monitoring
 
-        # (5) Upper Lindley recursion — accumulates when IR > midpoint(exceptional, good)
-        drift_up = ir_hat - 0.5 * (self.mu_exceptional + self.mu_good)
-        self.L_up = max(0.0, self.L_up + drift_up)
+            drift_up = ir_hat - 0.5 * (self.mu_exceptional + self.mu_good)
+            self.L_up = max(0.0, self.L_up + drift_up)
 
-        if self.L_up >= self.threshold:
-            self.all_alarms_up.append(self.t)
-            if not self.alarm_up:
-                self.alarm_up   = True
-                self.alarm_up_t = self.t
-            self.L_up = 0.0
+            if self.L_up >= self.threshold:
+                self.all_alarms_up.append(self.t)
+                if not self.alarm_up:
+                    self.alarm_up   = True
+                    self.alarm_up_t = self.t
+                self.L_up = 0.0
 
         self.e_prev = e
         state = {
             "t":             self.t,
+            "calibration":   in_calibration,
             "excess_return": e,
             "te_annual":     np.sqrt(self.sigma_monthly_sq * 12),
             "ir_hat":        ir_hat,
+            "ir_hat_raw":    ir_hat_raw,
             "L":             self.L,
             "L_up":          self.L_up,
             "alarm":         self.alarm,
@@ -228,6 +245,15 @@ class CUSUMMonitor:
 # PART 2 — Statistical utilities
 # ===========================================================================
 
+# Regime windows used to flag alarms that coincide with market crises
+GFC_START   = pd.Timestamp("2007-10-01")
+GFC_END     = pd.Timestamp("2009-03-31")
+COVID_START = pd.Timestamp("2020-02-01")
+COVID_END   = pd.Timestamp("2020-04-30")
+
+MIN_MONITORING_MONTHS = 36   # minimum months of live CUSUM after calibration
+
+
 def bootstrap_ir_ci(
     returns: pd.DataFrame,
     n_boot: int = 1000,
@@ -237,25 +263,29 @@ def bootstrap_ir_ci(
     seed: int = 42,
 ) -> Tuple[float, float, float]:
     """
-    Circular block bootstrap confidence interval on the annualised IR.
+    Circular block bootstrap CI on the annualised Information Ratio.
 
-    Block length ~ n^(1/3) preserves autocorrelation in the excess return series.
+    Uses LOG excess returns — same quantity the CUSUM statistic accumulates —
+    so the CI is consistent with what is being monitored.
+
+    Block length ~ n^(1/3) (Politis-White 2004) preserves autocorrelation.
 
     Returns
     -------
-    (ir_point, ci_lower, ci_upper)  at the (0.5, alpha/2, 1-alpha/2) quantiles.
+    (ir_point, ci_lower, ci_upper)
     """
-    excess    = returns[port_col] - returns[bench_col]
+    # Log excess return — consistent with CUSUM accumulation
+    excess    = np.log((1 + returns[port_col]) / (1 + returns[bench_col]))
     n         = len(excess)
     block_len = max(3, int(round(n ** (1 / 3))))
-    ir_point  = (excess.mean() * 12) / (excess.std() * np.sqrt(12))
+    ir_point  = (excess.mean() * 12) / (excess.std() * np.sqrt(12)) if excess.std() > 0 else 0.0
 
     rng      = np.random.default_rng(seed)
     boot_irs = []
     for _ in range(n_boot):
         starts  = rng.integers(0, n, size=int(np.ceil(n / block_len)))
         indices = np.concatenate([np.arange(s, s + block_len) % n for s in starts])[:n]
-        sample  = excess.iloc[indices].values
+        sample  = excess.values[indices]
         std     = sample.std()
         if std > 0:
             boot_irs.append((sample.mean() * 12) / (std * np.sqrt(12)))
@@ -263,6 +293,74 @@ def bootstrap_ir_ci(
     lo = float(np.percentile(boot_irs, 100 * alpha / 2))
     hi = float(np.percentile(boot_irs, 100 * (1 - alpha / 2)))
     return ir_point, lo, hi
+
+
+def compute_extra_stats(
+    returns: pd.DataFrame,
+    port_col: str = "portfolio",
+    bench_col: str = "benchmark",
+) -> dict:
+    """
+    Compute supplementary per-fund statistics a CIO needs beyond IR and TE.
+
+    Returns
+    -------
+    hit_rate    : fraction of months fund return > benchmark return
+    t_stat      : annualised t-statistic of the IR  (IR × sqrt(n/12))
+    up_cap      : up-capture ratio  (fund avg return / bench avg return in up months)
+    dn_cap      : down-capture ratio (same, in down months)
+    """
+    excess_log   = np.log((1 + returns[port_col]) / (1 + returns[bench_col]))
+    excess_arith = returns[port_col] - returns[bench_col]
+    n            = len(returns)
+
+    hit_rate = float((excess_arith > 0).mean())
+
+    ir = (excess_log.mean() * 12) / (excess_log.std() * np.sqrt(12)) if excess_log.std() > 0 else 0.0
+    t_stat = ir * np.sqrt(n / 12)
+
+    bench_up   = returns[bench_col] > 0
+    bench_down = ~bench_up
+
+    def _capture(mask):
+        b_mean = returns.loc[mask, bench_col].mean()
+        return returns.loc[mask, port_col].mean() / b_mean if mask.sum() >= 6 and b_mean != 0 else np.nan
+
+    return {
+        "hit_rate": hit_rate,
+        "t_stat":   t_stat,
+        "up_cap":   _capture(bench_up),
+        "dn_cap":   _capture(bench_down),
+    }
+
+
+def alarm_regime(alarm_date_str: str) -> str:
+    """Return 'GFC', 'COVID', or '' depending on whether the first alarm fell in a crisis."""
+    if not alarm_date_str or alarm_date_str == "-":
+        return ""
+    try:
+        d = pd.Timestamp(alarm_date_str)
+        if GFC_START <= d <= GFC_END:
+            return "GFC"
+        if COVID_START <= d <= COVID_END:
+            return "COVID"
+    except Exception:
+        pass
+    return ""
+
+
+def signal_quality(pa_df: pd.DataFrame, horizon: int = 12) -> Optional[float]:
+    """
+    Fraction of ALL alarms where the fund underperformed its benchmark
+    in the `horizon` months following the alarm.
+
+    This is the key metric for evaluating whether the CUSUM is generating
+    actionable signals or statistical noise. A value of 0.5 = coin flip.
+    """
+    if pa_df is None or pa_df.empty:
+        return None
+    rows = pa_df[(pa_df["horizon"] == horizon)].dropna(subset=["correct_alarm"])
+    return float(rows["correct_alarm"].mean()) if len(rows) > 0 else None
 
 
 def post_alarm_returns(
@@ -355,9 +453,42 @@ PRESET_PAIRS = {
     "MIEMX": ("MIEMX", "EEM", "MFS EM Equity vs MSCI EM"),
     "EEMAX": ("EEMAX", "EEM", "Eaton Vance EM vs MSCI EM"),
     "FSEAX": ("FSEAX", "EEM", "Fidelity EM vs MSCI EM"),
-    "LZOXX": ("LZOXX", "EEM", "Lazard EM Institutional vs MSCI EM"),
     "MADCX": ("MADCX", "EEM", "Madison EM vs MSCI EM"),
     "PDEZX": ("PDEZX", "EEM", "PGIM EM vs MSCI EM"),
+    # ── EM Hard Currency Bond (benchmark: EMB) ──────────────────────────────
+    "PEBIX":     ("PEBIX", "EMB", "PIMCO EM Bond vs JPM EM Bond (Hard CCY)"),
+    "EBNDX":     ("EBNDX", "EMB", "BlackRock EM Bond vs JPM EM Bond (Hard CCY)"),
+    "PREMX":     ("PREMX", "EMB", "T. Rowe Price EM Bond vs JPM EM Bond (Hard CCY)"),
+    "ABEMX_EMB": ("ABEMX", "EMB", "AB EM Debt vs JPM EM Bond (Hard CCY)"),
+    "TGBAX":     ("TGBAX", "EMB", "Templeton Global Bond vs JPM EM Bond (Hard CCY)"),
+    "IEMIX":     ("IEMIX", "EMB", "Invesco EM Sovereign Debt vs JPM EM Bond (Hard CCY)"),
+    "DBLEX":     ("DBLEX", "EMB", "DFA EM Fixed Income vs JPM EM Bond (Hard CCY)"),
+    "VWOB":      ("VWOB",  "EMB", "Vanguard EM Govt Bond ETF vs JPM EM Bond (Hard CCY)"),
+    "MSEDX":     ("MSEDX", "EMB", "MFS EM Debt vs JPM EM Bond (Hard CCY)"),
+    # ── EM Local Currency Bond (benchmark: EMLC) ────────────────────────────
+    "PFMIX": ("PFMIX", "EMLC", "PIMCO Foreign Bond vs VanEck EM Local CCY Bond"),
+    "PRLAX": ("PRLAX", "EMLC", "T. Rowe Price EM Local CCY Bond vs VanEck EM Local CCY Bond"),
+    # ── Global Equity (benchmark: ACWI — MSCI All Country World) ────────────
+    "CWGIX": ("CWGIX", "ACWI", "Capital World Growth & Income vs MSCI ACWI"),
+    "TEDIX": ("TEDIX", "ACWI", "Templeton Global Equity vs MSCI ACWI"),
+    "VHGEX": ("VHGEX", "ACWI", "Vanguard Global Equity vs MSCI ACWI"),
+    "OPGIX": ("OPGIX", "ACWI", "Invesco Oppenheimer Global vs MSCI ACWI"),
+    "GPROX": ("GPROX", "ACWI", "Goldman Sachs Global Equity vs MSCI ACWI"),
+    "SGIGX": ("SGIGX", "ACWI", "Schroders Global vs MSCI ACWI"),
+    "MGGIX": ("MGGIX", "ACWI", "MFS Global Equity vs MSCI ACWI"),
+    # ── Global Equity (benchmark: URTH — MSCI World) ────────────────────────
+    "AIVSX": ("AIVSX", "URTH", "American Investors vs MSCI World"),
+    "MGIAX": ("MGIAX", "URTH", "Morgan Stanley Institutional Global vs MSCI World"),
+    "JGVAX": ("JGVAX", "URTH", "JPMorgan Global Focus vs MSCI World"),
+    "HAINX": ("HAINX", "URTH", "Harbor International vs MSCI World"),
+    # ── AIAIM Global Equity (benchmark: ACWI) — Singapore-listed ─────────────
+    "0P0001I6KI.SI": ("0P0001I6KI.SI", "ACWI", "AIAIM Global Equity Fund A vs MSCI ACWI"),
+    "0P00008T6G.SI": ("0P00008T6G.SI", "ACWI", "AIAIM Global Equity Fund C vs MSCI ACWI"),
+    "0P00008T6D.SI": ("0P00008T6D.SI", "ACWI", "AIAIM Global Equity Fund D vs MSCI ACWI"),
+    "0P0001RMIN.SI": ("0P0001RMIN.SI", "ACWI", "AIAIM Global Equity Fund E vs MSCI ACWI"),
+    # ── AIAIM EM Bond (benchmark: EMB) — Singapore-listed ────────────────────
+    "0P0001KL95.SI": ("0P0001KL95.SI", "EMB", "AIAIM EM Bond Fund A vs JPM EM Bond"),
+    "0P00008T6N.SI": ("0P00008T6N.SI", "EMB", "AIAIM EM Bond Fund B vs JPM EM Bond"),
 }
 
 
@@ -638,11 +769,14 @@ def main():
         parser.print_help()
         return
 
+    import os
     fund  = args.fund.upper()
     bench = (args.bench.upper() if args.bench
              else PRESET_PAIRS.get(fund, (None, "SPY"))[1])
     title = PRESET_PAIRS.get(fund, (fund, bench, f"{fund} vs {bench}"))[2]
-    save  = args.output or f"{fund}_cusum.png"
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+    os.makedirs(out_dir, exist_ok=True)
+    save  = args.output or os.path.join(out_dir, f"{fund}_cusum.png")
 
     print(f"Loading {fund} vs {bench} from {args.start_date} via yfinance...")
     try:

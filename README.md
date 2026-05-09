@@ -1,102 +1,79 @@
-# CUSUM Active-Manager Monitor
+# CUSUM Active Manager Monitor
 
-Single-file implementation of the **Philips-Yashchin-Stein (2003)** statistical process control procedure for monitoring active portfolio managers.
+A quantitative framework for detecting persistent active manager underperformance using the **Philips-Yashchin-Stein (2003)** CUSUM change-point methodology.
 
-## What it does
+## Overview
 
-Applies a CUSUM (cumulative sum) change-point detector to a fund's monthly excess returns. It raises an alarm when the manager's Information Ratio falls below a threshold — signalling a potential loss of skill.
+The tool monitors a universe of 67 active funds against their respective benchmarks, flagging statistically significant degradation in Information Ratio in real time. Key design features:
+
+- **CUSUM statistic** with threshold h = 19.81 (ARL ≈ 60 months per fund under H₀)
+- **24-month calibration gate**: sigma EWMA warms up from day 1, but L accumulation begins only after the calibration window, preventing in-sample contamination
+- **IR winsorisation** at ±5: prevents a single crash month (e.g. March 2020, |IR_hat| > 40 with stale EWMA sigma) from single-handedly crossing the threshold
+- **Log-excess returns** used consistently across CUSUM accumulation, bootstrap CI, and IR computation
+- **Rolling restart**: CUSUM resets after each alarm, capturing all alarm events across history
+- **Two-sided CUSUM**: monitors both deterioration (L↑) and exceptional outperformance (L_up↑)
+- **Multiple-testing disclosure**: with 67 funds at ARL=60m, expected false alarms ≈ 13.4/year across the universe
+
+## Fund Universe
+
+| Asset Class | Funds | Benchmark |
+|---|---|---|
+| US Core Equity | 7 | S&P 500 (SPY) |
+| US Bond / Fixed Income | 4 | AGG / PTTRX |
+| Balanced | 2 | Blended |
+| EM Equity | 27 | EEM |
+| EM Hard CCY Bonds | 9 | EMB |
+| EM Local CCY Bonds | 2 | EMLC |
+| Global Equity (ACWI) | 7 | ACWI |
+| Global Equity (URTH) | 4 | URTH |
+| AIAIM Singapore | 7 | ACWI / EMB |
+
+## Statistical Outputs (per fund)
+
+- IR with 95% circular block bootstrap CI (Politis-White 2004), block length = n^(1/3)
+- t-statistic of alpha: IR × √(n/12)
+- Hit rate: % months fund beats benchmark
+- Up/Down capture ratios
+- GFC (Oct 2007–Mar 2009) and COVID (Feb–Apr 2020) regime tagging of first alarm
+- Signal quality: % of ALL alarm events where fund underperformed at +12M
 
 ## Installation
 
-**Clone the repo:**
 ```bash
-git clone https://github.com/bk113/cusum.git
-cd cusum
+pip install yfinance pandas numpy matplotlib reportlab scipy
 ```
-
-**Install dependencies:**
-```bash
-pip install -r requirements.txt
-```
-
-Or install manually:
-```bash
-pip install numpy pandas matplotlib pymupdf yfinance
-```
-
-> `yfinance` is required for live Yahoo Finance data.  
-> `pymupdf` is required for PDF report generation (`report.py`).  
-> All other packages are required for core CUSUM functionality.
 
 ## Usage
 
-### 1. Live fund from Yahoo Finance
 ```bash
-python cusum.py FCNTX
-python cusum.py FCNTX SPY 2005-01-01
-```
+# Run CUSUM analysis and save individual fund chart
+python cusum.py FCNTX SPY
 
-### 2. Your own CSV
-```python
-from cusum import load_from_csv, monitor_fund
-returns = load_from_csv('myfund.csv', 'fund_nav', 'benchmark_nav')
-monitor_fund(returns, title='My Fund', save_path='out.png')
-```
-
-### 3. Your own Excel
-```python
-from cusum import load_from_excel, monitor_fund
-returns = load_from_excel('myfund.xlsx', fund_col='fund_nav', bench_col='benchmark_nav')
-monitor_fund(returns, title='My Fund', save_path='out.png')
-```
-
-### 4. Offline self-test demo
-```bash
-python cusum.py --demo
-```
-
-### 5. Generate PDF report
-```bash
+# Generate full PDF report
 python report.py
 ```
-Produces `cusum_report.pdf` — a 5-page report covering:
 
-| Page | Content |
-|------|---------|
-| 1 | Cover — what CUSUM is and why it matters |
-| 2 | Methodology — step-by-step formula walkthrough + threshold table |
-| 3 | Fund universe — all 8 funds, benchmarks, asset classes |
-| 4 | Summary results — IR, TE, cumulative excess, alarm status |
-| 5 | Individual CUSUM charts — 2×4 grid with stats overlaid |
+Output files are saved to the `output/` folder:
+- `output/cusum_report.pdf` — full paginated report
 
-> Requires `pymupdf` and `yfinance`. Fetches live data on each run.
+## Report Structure
 
-## Preset fund/benchmark pairs
+1. Cover page
+2. Methodology overview
+3. Fund universe pages (6 funds/page, 3×2 grid with CUSUM charts)
+4. Summary results table (IR, t-stat, Hit%, Up/Dn Cap, Regime, alarms)
+5. Post-alarm return analysis (paginated, 14 rows/page)
 
-| Ticker | Benchmark | Description |
-|--------|-----------|-------------|
-| FCNTX | IWF | Fidelity Contrafund vs Russell 1000 Growth |
-| DODGX | IWD | Dodge & Cox Stock vs Russell 1000 Value |
-| AGTHX | SPY | AmFunds Growth Fund of America vs S&P 500 |
-| OTCFX | IWM | T. Rowe Price Small-Cap Stock vs Russell 2000 |
-| OAKIX | EFA | Oakmark International vs MSCI EAFE |
-| TEDMX | EEM | Templeton Developing Markets vs MSCI EM |
-| VWELX | AOR | Vanguard Wellington vs 60/40 Allocation |
-| PTTRX | AGG | PIMCO Total Return vs US Agg Bond |
+## Key Parameters
 
-## Alarm threshold table (Table 2, Philips-Yashchin-Stein 2003)
-
-| Threshold | ARL (IR=+0.5) | ARL (IR=0) | ARL (IR=-0.5) |
-|-----------|--------------|------------|---------------|
-| 11.81 | 24 months | 16 | 11 |
-| 15.00 | 36 months | 22 | 15 |
-| 17.60 | 48 months | 27 | 18 |
-| **19.81** | **60 months** | **32** | **21** |
-| 21.79 | 72 months | 37 | 23 |
-| 23.59 | 84 months | 41 | 25 |
-
-Default threshold is **19.81** (~1 false alarm per 5 years).
-
-## Reference
-
-Philips, T., Yashchin, E., & Stein, D. (2003). *Using statistical process control to monitor active managers.* Journal of Portfolio Management, 30(1), 86–94.
+| Parameter | Value | Notes |
+|---|---|---|
+| Threshold h | 19.81 | ARL ≈ 60 months under H₀ |
+| Calibration window | 24 months | L frozen; sigma EWMA runs |
+| IR cap | ±5 | Winsorise extreme monthly IR |
+| EWMA gamma | 0.90 | Variance decay factor |
+| μ_good | 0.5 | IR threshold for "good" regime |
+| μ_bad | 0.0 | IR threshold for "bad" regime |
+| μ_exceptional | 1.0 | IR threshold for exceptional regime |
+| Bootstrap block | n^(1/3) | Circular block bootstrap |
+| Min monitoring | 36 months | Short history flag |
