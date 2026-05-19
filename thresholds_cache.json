@@ -1,0 +1,20 @@
+{
+  "equity": {
+    "threshold": 19.4648,
+    "mu_good": 0.5,
+    "mu_bad": 0.0,
+    "target_arl": 84.0
+  },
+  "fixed_income": {
+    "threshold": 21.1641,
+    "mu_good": 0.3,
+    "mu_bad": 0.0,
+    "target_arl": 84.0
+  },
+  "balanced": {
+    "threshold": 20.2578,
+    "mu_good": 0.4,
+    "mu_bad": 0.0,
+    "target_arl": 84.0
+  }
+}
