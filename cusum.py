@@ -1,3 +1,5 @@
+
+
 """
 CUSUM Active-Manager Monitor — All-in-One
 ==========================================
@@ -113,6 +115,13 @@ ASSET_CLASS_PRESETS: dict = {
         "mu_good":   _MU_BALANCED_GOOD,  # annualised IR: 0.40
         "mu_bad":    _MU_BALANCED_BAD,
         "threshold": 19.81,
+    },
+    "em_debt": {
+        # EM hard- and local-currency debt — same mu targets as fixed_income
+        # but calibrated separately so the threshold reflects EM-bond TE.
+        "mu_good":   _MU_FIXEDINC_GOOD,  # annualised IR: 0.30
+        "mu_bad":    _MU_FIXEDINC_BAD,
+        "threshold": 19.81,              # fallback; overwritten at import
     },
 }
 
@@ -333,8 +342,8 @@ _CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "threshol
 
 
 def calibrate_threshold(
-    mu_good: float,
-    mu_bad: float,
+    mu_good: Optional[float] = None,
+    mu_bad: Optional[float] = None,
     initial_te: float = 0.04,
     target_arl: float = 84.0,
     n_paths: int = 10_000,
@@ -343,6 +352,7 @@ def calibrate_threshold(
     tol: float = 0.5,
     h_lo: float = 1.0,
     h_hi: float = 30.0,
+    asset_class: Optional[str] = None,
 ) -> float:
     """
     Find threshold h such that the simulated mean time-to-first-alarm under H₀
@@ -385,7 +395,26 @@ def calibrate_threshold(
     Returns
     -------
     Calibrated threshold h (float, rounded to 4 d.p.).
+
+    If ``asset_class`` is given (e.g. "equity", "fixed_income", "balanced"),
+    mu_good and mu_bad are taken from ASSET_CLASS_PRESETS and any explicit
+    mu_good/mu_bad arguments are ignored.
     """
+    if asset_class is not None:
+        if asset_class not in ASSET_CLASS_PRESETS:
+            raise ValueError(
+                f"Unknown asset_class {asset_class!r}. "
+                f"Valid keys: {list(ASSET_CLASS_PRESETS)}"
+            )
+        spec    = ASSET_CLASS_PRESETS[asset_class]
+        mu_good = spec["mu_good"]
+        mu_bad  = spec["mu_bad"]
+
+    if mu_good is None or mu_bad is None:
+        raise ValueError(
+            "Either asset_class or both mu_good and mu_bad must be provided."
+        )
+
     rng    = np.random.default_rng(seed)
     # Monthly log-excess mean and std under H₀ so that E[ir_hat_annual] = mu_good.
     # ir_hat_annual = (e / sigma_m) * sqrt(12)  where sigma_m = initial_te / sqrt(12)
@@ -430,6 +459,42 @@ def calibrate_threshold(
         else:
             hi = mid
     return round((lo + hi) / 2.0, 4)
+
+
+def calibrate_all_presets(
+    target_arl: float = 84.0,
+    n_paths: int = 10_000,
+    seed: int = 42,
+) -> None:
+    """
+    Recalibrate thresholds for every key in ASSET_CLASS_PRESETS and save to
+    thresholds_cache.json.  Called from report.py with ``--recalibrate``.
+
+    Parameters mirror those of calibrate_threshold().  Uses the same default
+    target_arl=84 (= 60 monitoring months + 24 calibration months).
+    """
+    print("Calibrating thresholds for all asset-class presets...")
+    cache = {}
+    for ac, spec in ASSET_CLASS_PRESETS.items():
+        h = calibrate_threshold(
+            mu_good=spec["mu_good"],
+            mu_bad=spec["mu_bad"],
+            target_arl=target_arl,
+            n_paths=n_paths,
+            seed=seed,
+        )
+        ASSET_CLASS_PRESETS[ac]["threshold"] = h
+        cache[ac] = {
+            "threshold": h,
+            "mu_good":   spec["mu_good"],
+            "mu_bad":    spec["mu_bad"],
+            "target_arl": target_arl,
+        }
+        print(f"  {ac}: h = {h}")
+
+    with open(_CACHE_PATH, "w") as f:
+        json.dump(cache, f, indent=2)
+    print(f"  saved -> {_CACHE_PATH}")
 
 
 def _ensure_presets_calibrated() -> None:
@@ -718,6 +783,15 @@ def alarm_regime(alarm_date_str: str) -> str:
     except Exception:
         pass
     return ""
+
+
+# Maps internal tag_alarm_regime() labels to display strings used in reports.
+VIX_REGIME_DISPLAY: dict = {
+    "low_vol":  "calm",
+    "med_vol":  "elevated",
+    "high_vol": "crisis",
+    "unknown":  "unknown",
+}
 
 
 def load_vix_history(start: str = "2005-01-01",

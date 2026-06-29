@@ -8,7 +8,7 @@ The tool monitors a universe of 67 active funds against their respective benchma
 
 - **CUSUM statistic** with threshold h = 19.81 (ARL ≈ 60 months per fund under H₀)
 - **24-month calibration gate**: sigma EWMA warms up from day 1, but L accumulation begins only after the calibration window, preventing in-sample contamination
-- **IR winsorisation** at ±5: prevents a single crash month (e.g. March 2020, |IR_hat| > 40 with stale EWMA sigma) from single-handedly crossing the threshold
+- **Regime outlier handling**: freeze L if |IR_hat_annual| > 14.0 — crash months (e.g. March 2020) are skipped entirely; raw IR preserved unchanged (not winsorised)
 - **Log-excess returns** used consistently across CUSUM accumulation, bootstrap CI, and IR computation
 - **Rolling restart**: CUSUM resets after each alarm, capturing all alarm events across history
 - **Two-sided CUSUM**: monitors both deterioration (L↑) and exceptional outperformance (L_up↑)
@@ -66,14 +66,19 @@ Output files are saved to the `output/` folder:
 
 ## Key Parameters
 
-| Parameter | Value | Notes |
-|---|---|---|
-| Threshold h | 19.81 | ARL ≈ 60 months under H₀ |
-| Calibration window | 24 months | L frozen; sigma EWMA runs |
-| IR cap | ±5 | Winsorise extreme monthly IR |
-| EWMA gamma | 0.90 | Variance decay factor |
-| μ_good | 0.5 | IR threshold for "good" regime |
-| μ_bad | 0.0 | IR threshold for "bad" regime |
-| μ_exceptional | 1.0 | IR threshold for exceptional regime |
-| Bootstrap block | n^(1/3) | Circular block bootstrap |
-| Min monitoring | 36 months | Short history flag |
+<!-- GENERATED PARAMETERS — DO NOT EDIT BY HAND -->
+<!-- Regenerate with: python generate_parameter_doc.py -->
+
+| Parameter | Value | Source | Mechanism / Notes |
+| --- | --- | --- | --- |
+| h (threshold) | 19.81 | CUSUMMonitor.threshold (dataclass default) | Alarm fires when L >= h. Fallback; overwritten at import by thresholds_cache.json (MC-calibrated per asset class). |
+| gamma | 0.9 | CUSUMMonitor.gamma (dataclass default) | EWMA decay for tracking-error estimate (Von Neumann estimator). ~10-month half-life. |
+| mu_good -- equity | 0.5 | cusum._MU_EQUITY_GOOD (module constant) | Annualised IR considered 'good' for equity mandates. Moustakides-optimal drift midpoint. |
+| mu_good -- fixed income / EM debt | 0.3 | cusum._MU_FIXEDINC_GOOD (module constant) | Annualised IR considered 'good' for fixed income and EM debt mandates. |
+| mu_good -- balanced | 0.4 | cusum._MU_BALANCED_GOOD (module constant) | Annualised IR considered 'good' for balanced mandates. |
+| mu_bad | 0.0 | CUSUMMonitor.mu_bad (dataclass default) | Annualised IR considered 'bad' (underperforming). Same across all asset classes. |
+| calibration_window | 24 months | CUSUMMonitor.calibration_months (dataclass default) | L frozen at 0 during this window; sigma EWMA warms up from month 1. Prevents in-sample contamination. |
+| regime_threshold | 14.0 | CUSUMMonitor.regime_threshold (dataclass default) | If |ir_hat_annual| exceeds this value, the month is a regime outlier: L is FROZEN (not updated), raw IR preserved unchanged. NOT winsorisation -- see cusum.py lines 149-153, 239. |
+| MIN_MONITORING_MONTHS | 60 | cusum.MIN_MONITORING_MONTHS (module constant) | Minimum months of live CUSUM history required for a fund to appear in the main analysis. Funds below this threshold are flagged as insufficient-history. |
+
+<!-- END GENERATED PARAMETERS -->

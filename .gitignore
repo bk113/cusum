@@ -4,3 +4,10 @@ __pycache__/
 .env
 output/preview_*.png
 output/*.pptx
+*.tar.gz
+2026 06 24 CUSUM data.xlsx
+/cusum_IC_report_*.csv
+/cusum_IC_report_*.xlsx
+/cusum_L_barchart.png
+/cusum_top5_timeseries.png
+/cusum_scatter.png

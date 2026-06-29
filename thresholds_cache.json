@@ -16,5 +16,11 @@
     "mu_good": 0.4,
     "mu_bad": 0.0,
     "target_arl": 84.0
+  },
+  "em_debt": {
+    "threshold": 21.1641,
+    "mu_good": 0.3,
+    "mu_bad": 0.0,
+    "target_arl": 84.0
   }
 }
